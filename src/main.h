@@ -36,7 +36,9 @@ namespace ark {
 
         render::text(L"Prisme ASA", FVector2D(10.0, 10.0), FLinearColor(0.54f, 0.39f, 0.82f, 1.0f), false, false, true);
 
-        // F1 toggle is handled in dx_hook::hkWndProc (single source of truth)
+        if (render::is_vk_clicked(VK_F1)) {
+            render::show_menu = !render::show_menu;
+        }
 
         if (!viewport) {
             diagnostics::end_frame();

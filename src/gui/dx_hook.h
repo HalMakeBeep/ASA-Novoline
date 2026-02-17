@@ -3,7 +3,6 @@
 // =============================================================
 // Transparent overlay using DirectComposition for per-pixel alpha.
 // Own DX11 device, ZERO interaction with game's DX12 pipeline.
-// NO WndProc hook — all input via GetAsyncKeyState polling.
 // =============================================================
 
 #include <d3d11.h>
@@ -22,6 +21,8 @@
 #include "imgui_menu.h"
 #include "../core/console.h"
 
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
+
 namespace dx_hook {
 
     using PresentFn = HRESULT(WINAPI*)(IDXGISwapChain*, UINT, UINT);
@@ -29,12 +30,11 @@ namespace dx_hook {
     // ── Hook state ──
     inline PresentFn oPresent           = nullptr;
     inline HWND      g_game_hwnd        = nullptr;
+    inline WNDPROC   g_game_wndproc     = nullptr;
     inline bool      g_initialized      = false;
     inline bool      g_init_failed      = false;
     inline int       g_frame_count      = 0;
     inline bool      g_rendering        = false;
-    inline bool      g_f1_held          = false;
-    inline bool      g_menu_was_open    = false;
 
     // ── Our overlay (independent DX11) ──
     inline HWND                     g_overlay_hwnd  = nullptr;
@@ -47,6 +47,30 @@ namespace dx_hook {
     inline IDCompositionVisual*     g_dcomp_visual  = nullptr;
     inline int                      g_width         = 0;
     inline int                      g_height        = 0;
+
+    // ── Game WndProc hook ──
+    inline LRESULT WINAPI hkWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        __try {
+            if (g_initialized) {
+                if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam))
+                    return true;
+
+                if (render::show_menu) {
+                    switch (msg) {
+                        case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
+                        case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_RBUTTONDBLCLK:
+                        case WM_MBUTTONDOWN: case WM_MBUTTONUP: case WM_MBUTTONDBLCLK:
+                        case WM_MOUSEWHEEL:  case WM_MOUSEHWHEEL:
+                        case WM_MOUSEMOVE:
+                        case WM_KEYDOWN: case WM_KEYUP: case WM_CHAR:
+                        case WM_SYSKEYDOWN: case WM_SYSKEYUP:
+                            return true;
+                    }
+                }
+            }
+        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+        return CallWindowProcW(g_game_wndproc, hwnd, msg, wParam, lParam);
+    }
 
     // ── Create overlay ──
     inline bool init_overlay() {
@@ -68,7 +92,7 @@ namespace dx_hook {
         wc.lpszClassName = L"PrismeOvl";
         RegisterClassExW(&wc);
 
-        // WS_EX_NOREDIRECTIONBITMAP for DirectComposition, WS_EX_TRANSPARENT = click-through
+        // WS_EX_NOREDIRECTIONBITMAP is REQUIRED for DirectComposition transparency
         g_overlay_hwnd = CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_NOREDIRECTIONBITMAP,
             L"PrismeOvl", L"",
@@ -145,22 +169,22 @@ namespace dx_hook {
         g_dcomp->Commit();
         dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] DirectComposition bound");
 
-        // ── ImGui — init with OVERLAY window, not game window ──
-        // This avoids interfering with game's cursor/input management
+        // ── ImGui ──
         ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO();
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
         io.IniFilename  = nullptr;
-        io.MouseDrawCursor = false;
+        io.MouseDrawCursor = true;
 
         prisme_theme::apply();
-        ImGui_ImplWin32_Init(g_overlay_hwnd);   // overlay, NOT game
+        ImGui_ImplWin32_Init(g_game_hwnd);
         ImGui_ImplDX11_Init(g_device, g_context);
 
-        // NO WndProc hook — zero interference with game input
+        // Hook game WndProc
+        g_game_wndproc = (WNDPROC)SetWindowLongPtrW(g_game_hwnd, GWLP_WNDPROC, (LONG_PTR)hkWndProc);
 
         g_initialized = true;
-        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] Overlay fully initialized (no WndProc hook)");
+        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] Overlay fully initialized!");
         return true;
     }
 
@@ -173,95 +197,44 @@ namespace dx_hook {
             DispatchMessageW(&msg);
         }
 
-        if (!IsWindow(g_game_hwnd) || IsIconic(g_game_hwnd))
-            return;
+        // Only render when game window is valid
+        if (IsWindow(g_game_hwnd) && !IsIconic(g_game_hwnd)) {
+            RECT r;
+            GetClientRect(g_game_hwnd, &r);
+            POINT pt = {0, 0};
+            ClientToScreen(g_game_hwnd, &pt);
 
-        RECT r;
-        GetClientRect(g_game_hwnd, &r);
-        POINT pt = {0, 0};
-        ClientToScreen(g_game_hwnd, &pt);
+            if (!IsWindowVisible(g_overlay_hwnd))
+                ShowWindow(g_overlay_hwnd, SW_SHOWNOACTIVATE);
 
-        if (!IsWindowVisible(g_overlay_hwnd))
-            ShowWindow(g_overlay_hwnd, SW_SHOWNOACTIVATE);
+            SetWindowPos(g_overlay_hwnd, HWND_TOPMOST,
+                pt.x, pt.y, r.right, r.bottom,
+                SWP_NOACTIVATE | SWP_NOSENDCHANGING);
 
-        // F1 toggle — polled via GetAsyncKeyState (works always, no WndProc needed)
-        {
-            bool f1_down = (GetAsyncKeyState(VK_F1) & 0x8000) != 0;
-            if (f1_down && !g_f1_held) {
-                render::show_menu = !render::show_menu;
+            // Clear transparent (alpha=0 = fully see-through)
+            float clear[4] = {0.f, 0.f, 0.f, 0.f};
+            g_context->ClearRenderTargetView(g_rtv, clear);
+            g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
+
+            D3D11_VIEWPORT vp = {};
+            vp.Width  = (float)r.right;
+            vp.Height = (float)r.bottom;
+            g_context->RSSetViewports(1, &vp);
+
+            // ImGui
+            ImGui_ImplDX11_NewFrame();
+            ImGui_ImplWin32_NewFrame();
+            ImGui::NewFrame();
+
+            ImGui::GetIO().MouseDrawCursor = render::show_menu;
+            if (render::show_menu) {
+                imgui_menu::draw();
             }
-            g_f1_held = f1_down;
+            ImGui::Render();
+            ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+
+            g_swapchain->Present(0, 0);
         }
-
-        SetWindowPos(g_overlay_hwnd, HWND_TOPMOST,
-            pt.x, pt.y, r.right, r.bottom,
-            SWP_NOACTIVATE | SWP_NOSENDCHANGING);
-
-        // Clear transparent
-        float clear[4] = {0.f, 0.f, 0.f, 0.f};
-        g_context->ClearRenderTargetView(g_rtv, clear);
-        g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
-
-        D3D11_VIEWPORT vp = {};
-        vp.Width  = (float)r.right;
-        vp.Height = (float)r.bottom;
-        g_context->RSSetViewports(1, &vp);
-
-        // ── Menu open/close transitions ──
-        if (render::show_menu && !g_menu_was_open) {
-            ClipCursor(nullptr);
-            dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] Menu OPENED");
-        }
-        if (!render::show_menu && g_menu_was_open) {
-            // Snap cursor to game center and re-clip
-            RECT gr;
-            GetClientRect(g_game_hwnd, &gr);
-            POINT center = { gr.right / 2, gr.bottom / 2 };
-            ClientToScreen(g_game_hwnd, &center);
-            SetCursorPos(center.x, center.y);
-
-            POINT tl = {0, 0}, br = {gr.right, gr.bottom};
-            ClientToScreen(g_game_hwnd, &tl);
-            ClientToScreen(g_game_hwnd, &br);
-            RECT clipScreen = {tl.x, tl.y, br.x, br.y};
-            ClipCursor(&clipScreen);
-            dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] Menu CLOSED - cursor re-clipped");
-        }
-        g_menu_was_open = render::show_menu;
-
-        // ImGui frame
-        ImGui_ImplDX11_NewFrame();
-        ImGui_ImplWin32_NewFrame();
-
-        // All mouse input via hardware polling — no WndProc dependency
-        if (render::show_menu) {
-            ClipCursor(nullptr);  // undo game's clip every frame
-            ImGuiIO& io = ImGui::GetIO();
-            POINT mpt;
-            GetCursorPos(&mpt);
-            // Convert to overlay-relative coords (overlay matches game position)
-            mpt.x -= pt.x;
-            mpt.y -= pt.y;
-            io.MousePos = ImVec2((float)mpt.x, (float)mpt.y);
-            io.MouseDown[0] = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
-            io.MouseDown[1] = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
-            io.MouseDown[2] = (GetAsyncKeyState(VK_MBUTTON) & 0x8000) != 0;
-        } else {
-            ImGuiIO& io = ImGui::GetIO();
-            io.MousePos = ImVec2(-FLT_MAX, -FLT_MAX);
-            io.MouseDown[0] = io.MouseDown[1] = io.MouseDown[2] = false;
-        }
-
-        ImGui::NewFrame();
-
-        ImGui::GetIO().MouseDrawCursor = render::show_menu;
-        if (render::show_menu) {
-            imgui_menu::draw();
-        }
-        ImGui::Render();
-        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-
-        g_swapchain->Present(0, 0);
     }
 
     // ── Present hook (MINIMAL) ──
