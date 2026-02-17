@@ -63,7 +63,7 @@ endif()
 
 target_link_libraries(ASA-Internal PRIVATE
         kernel32 user32 gdi32 advapi32 shell32 ole32
-        d3d11 d3d12 d3dcompiler dxgi dwmapi
+        d3d11 d3d12 d3dcompiler dxgi dwmapi dcomp
 )
 
 # Output DLL next to launcher

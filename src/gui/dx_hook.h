@@ -1,19 +1,16 @@
 #pragma once
 
 // =============================================================
-// Transparent overlay approach: creates a SEPARATE transparent
-// window with its own DX11 device. ZERO interaction with the
-// game's DX12 rendering pipeline. Cannot cause GPU crashes.
-//
-// - Present hook: only reads game HWND + provides frame timing
-// - WndProc hook: feeds input to ImGui when menu is open
-// - Overlay window: our own DX11, renders ImGui independently
+// Transparent overlay using DirectComposition for per-pixel alpha.
+// Own DX11 device, ZERO interaction with game's DX12 pipeline.
+// NO WndProc hook — all input via GetAsyncKeyState polling.
 // =============================================================
 
 #include <d3d11.h>
-#include <d3d12.h>      // only for dummy device to read DXGI vtable
+#include <d3d12.h>      // only for dummy device vtable
+#include <dxgi1_2.h>
 #include <dxgi1_4.h>
-#include <dwmapi.h>
+#include <dcomp.h>
 #include <MinHook.h>
 
 #include "imgui.h"
@@ -25,10 +22,6 @@
 #include "imgui_menu.h"
 #include "../core/console.h"
 
-#pragma comment(lib, "dwmapi.lib")
-
-extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
-
 namespace dx_hook {
 
     using PresentFn = HRESULT(WINAPI*)(IDXGISwapChain*, UINT, UINT);
@@ -36,172 +29,229 @@ namespace dx_hook {
     // ── Hook state ──
     inline PresentFn oPresent           = nullptr;
     inline HWND      g_game_hwnd        = nullptr;
-    inline WNDPROC   g_game_wndproc     = nullptr;
     inline bool      g_initialized      = false;
     inline bool      g_init_failed      = false;
     inline int       g_frame_count      = 0;
-    inline bool      g_rendering        = false;   // re-entrancy guard
+    inline bool      g_rendering        = false;
+    inline bool      g_f1_held          = false;
+    inline bool      g_menu_was_open    = false;
 
-    // ── Our own overlay (completely independent from game) ──
-    inline HWND                   g_overlay_hwnd = nullptr;
-    inline ID3D11Device*          g_device       = nullptr;
-    inline ID3D11DeviceContext*   g_context      = nullptr;
-    inline IDXGISwapChain*        g_swapchain    = nullptr;
-    inline ID3D11RenderTargetView* g_rtv         = nullptr;
+    // ── Our overlay (independent DX11) ──
+    inline HWND                     g_overlay_hwnd  = nullptr;
+    inline ID3D11Device*            g_device        = nullptr;
+    inline ID3D11DeviceContext*     g_context       = nullptr;
+    inline IDXGISwapChain1*         g_swapchain     = nullptr;
+    inline ID3D11RenderTargetView*  g_rtv           = nullptr;
+    inline IDCompositionDevice*     g_dcomp         = nullptr;
+    inline IDCompositionTarget*     g_dcomp_target  = nullptr;
+    inline IDCompositionVisual*     g_dcomp_visual  = nullptr;
+    inline int                      g_width         = 0;
+    inline int                      g_height        = 0;
 
-    // ── Game WndProc hook (input handling) ──
-    inline LRESULT WINAPI hkWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-        __try {
-            if (g_initialized && ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam))
-                return true;
-
-            if (g_initialized && render::show_menu) {
-                ImGuiIO& io = ImGui::GetIO();
-                if (io.WantCaptureMouse) {
-                    switch (msg) {
-                        case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
-                        case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_RBUTTONDBLCLK:
-                        case WM_MBUTTONDOWN: case WM_MBUTTONUP: case WM_MBUTTONDBLCLK:
-                        case WM_MOUSEWHEEL: case WM_MOUSEHWHEEL:
-                        case WM_MOUSEMOVE:
-                            return true;
-                    }
-                }
-                if (io.WantCaptureKeyboard) {
-                    switch (msg) {
-                        case WM_KEYDOWN: case WM_KEYUP: case WM_CHAR:
-                        case WM_SYSKEYDOWN: case WM_SYSKEYUP:
-                            return true;
-                    }
-                }
-            }
-        } __except(EXCEPTION_EXECUTE_HANDLER) {}
-        return CallWindowProcW(g_game_wndproc, hwnd, msg, wParam, lParam);
-    }
-
-    // ── Create overlay window + DX11 device ──
+    // ── Create overlay ──
     inline bool init_overlay() {
-        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] init_overlay (game_hwnd=%p)...", g_game_hwnd);
+        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] init_overlay (game=%p)...", g_game_hwnd);
 
-        // Get game client area in screen coords
         RECT r;
         GetClientRect(g_game_hwnd, &r);
         POINT pt = {0, 0};
         ClientToScreen(g_game_hwnd, &pt);
-        int w = r.right, h = r.bottom;
+        g_width = r.right;
+        g_height = r.bottom;
 
-        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] Game client: %dx%d at (%d,%d)", w, h, pt.x, pt.y);
+        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] Game: %dx%d at (%d,%d)", g_width, g_height, pt.x, pt.y);
 
-        // Register overlay window class
+        // Register class
         WNDCLASSEXW wc = {sizeof(wc)};
         wc.lpfnWndProc  = DefWindowProcW;
         wc.hInstance     = GetModuleHandleW(nullptr);
         wc.lpszClassName = L"PrismeOvl";
         RegisterClassExW(&wc);
 
-        // Create transparent, topmost, click-through overlay
-        // WS_EX_TOOLWINDOW hides from taskbar/alt-tab
+        // WS_EX_NOREDIRECTIONBITMAP for DirectComposition, WS_EX_TRANSPARENT = click-through
         g_overlay_hwnd = CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+            WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_NOREDIRECTIONBITMAP,
             L"PrismeOvl", L"",
             WS_POPUP,
-            pt.x, pt.y, w, h,
+            pt.x, pt.y, g_width, g_height,
             nullptr, nullptr, wc.hInstance, nullptr);
 
         if (!g_overlay_hwnd) {
-            dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] CreateWindowExW failed: %u", GetLastError());
+            dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] CreateWindow failed: %u", GetLastError());
             return false;
         }
-
-        // Color key transparency: RGB(0,0,0) pixels become transparent
-        SetLayeredWindowAttributes(g_overlay_hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
         ShowWindow(g_overlay_hwnd, SW_SHOWNOACTIVATE);
+        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] Overlay window: %p", g_overlay_hwnd);
 
-        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] Overlay window created: %p", g_overlay_hwnd);
-
-        // Create our own DX11 device + swap chain (completely separate from game!)
-        DXGI_SWAP_CHAIN_DESC sd = {};
-        sd.BufferCount        = 2;
-        sd.BufferDesc.Width   = w;
-        sd.BufferDesc.Height  = h;
-        sd.BufferDesc.Format  = DXGI_FORMAT_B8G8R8A8_UNORM;
-        sd.BufferUsage        = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        sd.OutputWindow       = g_overlay_hwnd;
-        sd.SampleDesc.Count   = 1;
-        sd.Windowed           = TRUE;
-        sd.SwapEffect         = DXGI_SWAP_EFFECT_DISCARD;
-
-        D3D_FEATURE_LEVEL fl  = D3D_FEATURE_LEVEL_11_0;
-        HRESULT hr = D3D11CreateDeviceAndSwapChain(
+        // ── Create DX11 device ──
+        D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0;
+        HRESULT hr = D3D11CreateDevice(
             nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
             &fl, 1, D3D11_SDK_VERSION,
-            &sd, &g_swapchain, &g_device, nullptr, &g_context);
-
+            &g_device, nullptr, &g_context);
         if (FAILED(hr)) {
-            dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] D3D11 create failed: 0x%08X", (unsigned)hr);
-            DestroyWindow(g_overlay_hwnd); g_overlay_hwnd = nullptr;
+            dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] D3D11CreateDevice failed: 0x%08X", (unsigned)hr);
             return false;
         }
+        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] DX11 device OK");
 
-        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] DX11 device created for overlay");
+        // ── Get DXGI factory from device ──
+        IDXGIDevice* dxgi_dev = nullptr;
+        g_device->QueryInterface(IID_PPV_ARGS(&dxgi_dev));
+        IDXGIAdapter* adapter = nullptr;
+        dxgi_dev->GetAdapter(&adapter);
+        IDXGIFactory2* factory = nullptr;
+        adapter->GetParent(IID_PPV_ARGS(&factory));
+        adapter->Release();
 
-        // Create render target view
+        // ── Create swap chain for composition (premultiplied alpha!) ──
+        DXGI_SWAP_CHAIN_DESC1 sd = {};
+        sd.Width              = g_width;
+        sd.Height             = g_height;
+        sd.Format             = DXGI_FORMAT_B8G8R8A8_UNORM;
+        sd.SampleDesc.Count   = 1;
+        sd.BufferUsage        = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        sd.BufferCount        = 2;
+        sd.SwapEffect         = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+        sd.AlphaMode          = DXGI_ALPHA_MODE_PREMULTIPLIED;
+
+        hr = factory->CreateSwapChainForComposition(g_device, &sd, nullptr, &g_swapchain);
+        factory->Release();
+        if (FAILED(hr)) {
+            dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] CreateSwapChainForComposition failed: 0x%08X", (unsigned)hr);
+            dxgi_dev->Release();
+            return false;
+        }
+        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] Composition swap chain OK");
+
+        // ── RTV ──
         ID3D11Texture2D* bb = nullptr;
         g_swapchain->GetBuffer(0, IID_PPV_ARGS(&bb));
         g_device->CreateRenderTargetView(bb, nullptr, &g_rtv);
         bb->Release();
 
-        // Init ImGui with GAME hwnd (for correct mouse coordinate mapping)
+        // ── DirectComposition: bind swap chain to overlay window ──
+        hr = DCompositionCreateDevice(dxgi_dev, IID_PPV_ARGS(&g_dcomp));
+        dxgi_dev->Release();
+        if (FAILED(hr)) {
+            dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] DCompositionCreateDevice failed: 0x%08X", (unsigned)hr);
+            return false;
+        }
+
+        g_dcomp->CreateTargetForHwnd(g_overlay_hwnd, TRUE, &g_dcomp_target);
+        g_dcomp->CreateVisual(&g_dcomp_visual);
+        g_dcomp_visual->SetContent(g_swapchain);
+        g_dcomp_target->SetRoot(g_dcomp_visual);
+        g_dcomp->Commit();
+        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] DirectComposition bound");
+
+        // ── ImGui — init with OVERLAY window, not game window ──
+        // This avoids interfering with game's cursor/input management
         ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO();
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
         io.IniFilename  = nullptr;
-        io.MouseDrawCursor = true;
+        io.MouseDrawCursor = false;
 
         prisme_theme::apply();
-        ImGui_ImplWin32_Init(g_game_hwnd);              // game HWND for input
-        ImGui_ImplDX11_Init(g_device, g_context);       // our DX11 for rendering
+        ImGui_ImplWin32_Init(g_overlay_hwnd);   // overlay, NOT game
+        ImGui_ImplDX11_Init(g_device, g_context);
 
-        // Hook game WndProc for ImGui input
-        g_game_wndproc = (WNDPROC)SetWindowLongPtrW(g_game_hwnd, GWLP_WNDPROC, (LONG_PTR)hkWndProc);
+        // NO WndProc hook — zero interference with game input
 
         g_initialized = true;
-        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] Overlay fully initialized!");
+        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] Overlay fully initialized (no WndProc hook)");
         return true;
     }
 
-    // ── Render one frame ──
+    // ── Render ──
     inline void render_frame() {
-        // Pump overlay window messages
+        // Pump overlay messages
         MSG msg;
         while (PeekMessageW(&msg, g_overlay_hwnd, 0, 0, PM_REMOVE)) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
 
-        // Keep overlay on top, matching game position
+        if (!IsWindow(g_game_hwnd) || IsIconic(g_game_hwnd))
+            return;
+
         RECT r;
         GetClientRect(g_game_hwnd, &r);
         POINT pt = {0, 0};
         ClientToScreen(g_game_hwnd, &pt);
+
+        if (!IsWindowVisible(g_overlay_hwnd))
+            ShowWindow(g_overlay_hwnd, SW_SHOWNOACTIVATE);
+
+        // F1 toggle — polled via GetAsyncKeyState (works always, no WndProc needed)
+        {
+            bool f1_down = (GetAsyncKeyState(VK_F1) & 0x8000) != 0;
+            if (f1_down && !g_f1_held) {
+                render::show_menu = !render::show_menu;
+            }
+            g_f1_held = f1_down;
+        }
+
         SetWindowPos(g_overlay_hwnd, HWND_TOPMOST,
             pt.x, pt.y, r.right, r.bottom,
             SWP_NOACTIVATE | SWP_NOSENDCHANGING);
 
-        // Clear with fully transparent
-        float clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-        g_context->ClearRenderTargetView(g_rtv, clear_color);
+        // Clear transparent
+        float clear[4] = {0.f, 0.f, 0.f, 0.f};
+        g_context->ClearRenderTargetView(g_rtv, clear);
         g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
 
-        // Viewport
         D3D11_VIEWPORT vp = {};
         vp.Width  = (float)r.right;
         vp.Height = (float)r.bottom;
         g_context->RSSetViewports(1, &vp);
 
+        // ── Menu open/close transitions ──
+        if (render::show_menu && !g_menu_was_open) {
+            ClipCursor(nullptr);
+            dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] Menu OPENED");
+        }
+        if (!render::show_menu && g_menu_was_open) {
+            // Snap cursor to game center and re-clip
+            RECT gr;
+            GetClientRect(g_game_hwnd, &gr);
+            POINT center = { gr.right / 2, gr.bottom / 2 };
+            ClientToScreen(g_game_hwnd, &center);
+            SetCursorPos(center.x, center.y);
+
+            POINT tl = {0, 0}, br = {gr.right, gr.bottom};
+            ClientToScreen(g_game_hwnd, &tl);
+            ClientToScreen(g_game_hwnd, &br);
+            RECT clipScreen = {tl.x, tl.y, br.x, br.y};
+            ClipCursor(&clipScreen);
+            dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] Menu CLOSED - cursor re-clipped");
+        }
+        g_menu_was_open = render::show_menu;
+
         // ImGui frame
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
+
+        // All mouse input via hardware polling — no WndProc dependency
+        if (render::show_menu) {
+            ClipCursor(nullptr);  // undo game's clip every frame
+            ImGuiIO& io = ImGui::GetIO();
+            POINT mpt;
+            GetCursorPos(&mpt);
+            // Convert to overlay-relative coords (overlay matches game position)
+            mpt.x -= pt.x;
+            mpt.y -= pt.y;
+            io.MousePos = ImVec2((float)mpt.x, (float)mpt.y);
+            io.MouseDown[0] = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+            io.MouseDown[1] = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
+            io.MouseDown[2] = (GetAsyncKeyState(VK_MBUTTON) & 0x8000) != 0;
+        } else {
+            ImGuiIO& io = ImGui::GetIO();
+            io.MousePos = ImVec2(-FLT_MAX, -FLT_MAX);
+            io.MouseDown[0] = io.MouseDown[1] = io.MouseDown[2] = false;
+        }
+
         ImGui::NewFrame();
 
         ImGui::GetIO().MouseDrawCursor = render::show_menu;
@@ -211,22 +261,19 @@ namespace dx_hook {
         ImGui::Render();
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
-        // Present our overlay (NOT the game's swap chain)
-        g_swapchain->Present(1, 0);
+        g_swapchain->Present(0, 0);
     }
 
-    // ── Present hook: MINIMAL, only reads HWND + provides frame timing ──
+    // ── Present hook (MINIMAL) ──
     inline HRESULT WINAPI hkPresent(IDXGISwapChain* swap, UINT sync, UINT flags) {
-        // Re-entrancy guard: our overlay's Present may trigger this hook
         if (g_rendering) return oPresent(swap, sync, flags);
         g_rendering = true;
 
         g_frame_count++;
 
-        // Warmup: let engine fully init
         if (g_frame_count < 100) {
             if (g_frame_count == 1)
-                dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] Present hook ALIVE, warming up...");
+                dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] Present hook ALIVE");
             if (g_frame_count == 50)
                 dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] Warmup 50/100...");
             g_rendering = false;
@@ -239,7 +286,6 @@ namespace dx_hook {
         }
 
         __try {
-            // Get game HWND from swap chain (once)
             if (!g_game_hwnd) {
                 DXGI_SWAP_CHAIN_DESC desc;
                 if (SUCCEEDED(swap->GetDesc(&desc))) {
@@ -248,7 +294,6 @@ namespace dx_hook {
                 }
             }
 
-            // Init overlay (once)
             if (!g_initialized && g_game_hwnd) {
                 if (!init_overlay()) {
                     dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] init_overlay FAILED");
@@ -256,24 +301,23 @@ namespace dx_hook {
                 }
             }
 
-            // Render each frame
             if (g_initialized) {
                 render_frame();
             }
         } __except(EXCEPTION_EXECUTE_HANDLER) {
-            static int ex_count = 0;
-            if (++ex_count <= 3)
-                dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] Exception #%d in Present", ex_count);
-            if (ex_count >= 3) g_init_failed = true;
+            static int ex = 0;
+            if (++ex <= 3)
+                dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] Exception #%d", ex);
+            if (ex >= 3) g_init_failed = true;
         }
 
         g_rendering = false;
         return oPresent(swap, sync, flags);
     }
 
-    // ── Get DXGI Present address via dummy DX12 device ──
-    inline bool get_present_addr(void** out_present) {
-        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] Creating dummy device for vtable...");
+    // ── Get Present vtable address ──
+    inline bool get_present_addr(void** out) {
+        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] Creating dummy device...");
 
         WNDCLASSEXW wc = {sizeof(wc), CS_CLASSDC, DefWindowProcW, 0, 0,
                           GetModuleHandleW(nullptr), nullptr, nullptr, nullptr, nullptr,
@@ -284,7 +328,6 @@ namespace dx_hook {
 
         ID3D12Device* dev = nullptr;
         if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dev)))) {
-            dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] D3D12CreateDevice failed");
             DestroyWindow(hwnd); UnregisterClassW(wc.lpszClassName, wc.hInstance);
             return false;
         }
@@ -307,59 +350,50 @@ namespace dx_hook {
         }
 
         DXGI_SWAP_CHAIN_DESC1 sd = {};
-        sd.BufferCount    = 2;
-        sd.Width          = 100;
-        sd.Height         = 100;
-        sd.Format         = DXGI_FORMAT_R8G8B8A8_UNORM;
-        sd.BufferUsage    = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        sd.SwapEffect     = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        sd.BufferCount      = 2;
+        sd.Width            = 100;
+        sd.Height           = 100;
+        sd.Format           = DXGI_FORMAT_R8G8B8A8_UNORM;
+        sd.BufferUsage      = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        sd.SwapEffect       = DXGI_SWAP_EFFECT_FLIP_DISCARD;
         sd.SampleDesc.Count = 1;
 
         IDXGISwapChain1* swap = nullptr;
         factory->CreateSwapChainForHwnd(queue, hwnd, &sd, nullptr, nullptr, &swap);
         if (!swap) {
-            dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] Dummy swap chain failed");
             factory->Release(); queue->Release(); dev->Release();
             DestroyWindow(hwnd); UnregisterClassW(wc.lpszClassName, wc.hInstance);
             return false;
         }
 
         void** vtable = *reinterpret_cast<void***>(swap);
-        *out_present = vtable[8]; // IDXGISwapChain::Present
+        *out = vtable[8];
 
-        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] Present addr=%p", *out_present);
+        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] Present=%p", *out);
 
-        swap->Release();
-        factory->Release();
-        queue->Release();
-        dev->Release();
-        DestroyWindow(hwnd);
-        UnregisterClassW(wc.lpszClassName, wc.hInstance);
+        swap->Release(); factory->Release(); queue->Release(); dev->Release();
+        DestroyWindow(hwnd); UnregisterClassW(wc.lpszClassName, wc.hInstance);
         return true;
     }
 
-    // ── Main init ──
+    // ── Init ──
     inline bool initialize() {
-        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] === Initialize (overlay window mode) ===");
+        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] === Initialize (DirectComposition overlay) ===");
 
         if (MH_Initialize() != MH_OK) {
             dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] MH_Initialize failed");
             return false;
         }
 
-        void* present_addr = nullptr;
-        if (!get_present_addr(&present_addr)) {
-            dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] Failed to get Present address");
-            return false;
-        }
+        void* addr = nullptr;
+        if (!get_present_addr(&addr)) return false;
 
-        // Only hook Present - nothing else!
-        MH_STATUS s = MH_CreateHook(present_addr, &hkPresent, reinterpret_cast<void**>(&oPresent));
-        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] Hook Present result=%d", s);
+        MH_STATUS s = MH_CreateHook(addr, &hkPresent, reinterpret_cast<void**>(&oPresent));
+        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] Hook result=%d", s);
         if (s != MH_OK) return false;
 
         MH_EnableHook(MH_ALL_HOOKS);
-        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] Hook enabled, waiting for Present calls...");
+        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX_HOOK] Hook enabled");
         return true;
     }
 

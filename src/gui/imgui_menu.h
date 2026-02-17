@@ -65,7 +65,6 @@ namespace imgui_menu {
         ImGui::PopStyleColor();
 
         if (active_key == key) {
-            // Check mouse buttons
             if (GetAsyncKeyState(VK_LBUTTON) & 0x8000) {
                 // ignore - that's the click to activate
             } else if (GetAsyncKeyState(VK_RBUTTON) & 0x8000) {
@@ -77,7 +76,7 @@ namespace imgui_menu {
             } else if (GetAsyncKeyState(VK_XBUTTON2) & 0x8000) {
                 *key = VK_XBUTTON2; active_key = nullptr; changed = true;
             } else if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) {
-                active_key = nullptr; // cancel
+                active_key = nullptr;
             } else {
                 for (int vk = 0x08; vk < 0xFF; vk++) {
                     if (vk == VK_LBUTTON || vk == VK_RBUTTON || vk == VK_MBUTTON ||

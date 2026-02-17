@@ -36,11 +36,7 @@ namespace ark {
 
         render::text(L"Prisme ASA", FVector2D(10.0, 10.0), FLinearColor(0.54f, 0.39f, 0.82f, 1.0f), false, false, true);
 
-        if (render::is_vk_clicked(VK_F1)) {
-            render::show_menu = !render::show_menu;
-        }
-
-        // Menu is now rendered via ImGui through DX11 Present hook (dx_hook.h)
+        // F1 toggle is handled in dx_hook::hkWndProc (single source of truth)
 
         if (!viewport) {
             diagnostics::end_frame();

@@ -13,6 +13,7 @@ namespace dbg {
 
     inline HANDLE  hConsole = nullptr;
     inline FILE*   fpOut = nullptr;
+    inline FILE*   fpLog = nullptr;       // log file handle
     inline bool    active = false;
     inline CRITICAL_SECTION cs = {};
     inline bool    cs_initialized = false;
@@ -117,6 +118,24 @@ namespace dbg {
         SMALL_RECT windowSize = { 0, 0, 139, 39 };
         SetConsoleWindowInfo(hConsole, TRUE, &windowSize);
 
+        // Open log file next to the DLL
+        if (!fpLog) {
+            char path[MAX_PATH] = {};
+            HMODULE hm = nullptr;
+            GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCSTR)&init, &hm);
+            GetModuleFileNameA(hm, path, MAX_PATH);
+            // Replace filename with "prisme_log.txt"
+            char* last_slash = strrchr(path, '\\');
+            if (last_slash) *(last_slash + 1) = '\0';
+            strcat_s(path, "prisme_log.txt");
+            fpLog = fopen(path, "w");
+            if (fpLog) {
+                fprintf(fpLog, "=== Prisme ASA Log Started ===\n");
+                fflush(fpLog);
+            }
+        }
+
         active = true;
         return true;
     }
@@ -124,6 +143,7 @@ namespace dbg {
     inline void shutdown() {
         if (!active) return;
         active = false;
+        if (fpLog) { fprintf(fpLog, "=== Log Ended ===\n"); fclose(fpLog); fpLog = nullptr; }
         if (fpOut) fclose(fpOut);
         FreeConsole();
         fpOut = nullptr;
@@ -139,26 +159,39 @@ namespace dbg {
 
     inline void print_ex(Level level, Category category, const char* fmt, va_list args) {
         if (!active || !hConsole) return;
-        if (!should_log(level, category)) return;
 
         EnterCriticalSection(&cs);
 
         char timestamp[32];
         get_timestamp(timestamp, sizeof(timestamp));
 
-        SetConsoleTextAttribute(hConsole, COLOR_GRAY);
-        printf("%s ", timestamp);
+        // Always write to log file (captures everything, even filtered messages)
+        if (fpLog) {
+            va_list args_copy;
+            va_copy(args_copy, args);
+            fprintf(fpLog, "%s [%s] [%s] ", timestamp, level_str(level), category_str(category));
+            vfprintf(fpLog, fmt, args_copy);
+            fprintf(fpLog, "\n");
+            fflush(fpLog);  // flush immediately so nothing lost on crash
+            va_end(args_copy);
+        }
 
-        SetConsoleTextAttribute(hConsole, level_color(level));
-        printf("[%s] ", level_str(level));
+        // Console output respects level/category filter
+        if (should_log(level, category)) {
+            SetConsoleTextAttribute(hConsole, COLOR_GRAY);
+            printf("%s ", timestamp);
 
-        SetConsoleTextAttribute(hConsole, COLOR_MAGENTA);
-        printf("[%s] ", category_str(category));
+            SetConsoleTextAttribute(hConsole, level_color(level));
+            printf("[%s] ", level_str(level));
 
-        SetConsoleTextAttribute(hConsole, COLOR_WHITE);
-        vprintf(fmt, args);
-        printf("\n");
-        fflush(stdout);
+            SetConsoleTextAttribute(hConsole, COLOR_MAGENTA);
+            printf("[%s] ", category_str(category));
+
+            SetConsoleTextAttribute(hConsole, COLOR_WHITE);
+            vprintf(fmt, args);
+            printf("\n");
+            fflush(stdout);
+        }
 
         LeaveCriticalSection(&cs);
     }
