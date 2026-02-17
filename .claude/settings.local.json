@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git checkout:*)",
+      "Bash(grep:*)",
+      "Bash(curl:*)",
+      "Bash(git clone:*)",
+      "Bash(BASE=\"https://raw.githubusercontent.com/TsudaKageyu/minhook/master\")",
+      "Bash(CPATH=\"/c/Program Files/Microsoft Visual Studio/18/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe\")",
+      "Bash(\"$CPATH\" --version)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(cmake --build:*)",
+      "Bash(\"/c/Program Files/CMake/bin/cmake.exe\" --build build --config Release)",
+      "Bash(cmd.exe /c \"where cmake\")",
+      "Bash(ls:*)",
+      "Bash(cmd.exe /c \"\"\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\18\\\\Community\\\\Common7\\\\Tools\\\\VsDevCmd.bat\"\" -arch=amd64 >nul 2>&1 && \"\"C:\\\\Program Files\\\\JetBrains\\\\CLion 2025.3.2\\\\bin\\\\cmake\\\\win\\\\x64\\\\bin\\\\cmake.exe\"\" --build \"\"c:\\\\Users\\\\Yeis\\\\Desktop\\\\PrismeASA\\\\cmake-build-debug\"\" --target ASA-Internal 2>&1\")",
+      "Bash(cmd.exe /c \"call \"\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\18\\\\Community\\\\Common7\\\\Tools\\\\VsDevCmd.bat\"\" -arch=amd64 && \"\"C:\\\\Program Files\\\\JetBrains\\\\CLion 2025.3.2\\\\bin\\\\cmake\\\\win\\\\x64\\\\bin\\\\cmake.exe\"\" --build \"\"c:\\\\Users\\\\Yeis\\\\Desktop\\\\PrismeASA\\\\cmake-build-debug\"\" --target ASA-Internal\")",
+      "Bash(cmd.exe //c:*)"
+    ]
+  }
+}

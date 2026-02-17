@@ -34,15 +34,13 @@ namespace ark {
         render::screen_center = center;
         render::screen_size = screen_size;
 
-        render::text(L"HalMakeBeep Ark ASA", FVector2D(10.0, 10.0), FLinearColor(1.0f, 0.0f, 1.0f, 1.0f), false, false, true);
+        render::text(L"Prisme ASA", FVector2D(10.0, 10.0), FLinearColor(0.54f, 0.39f, 0.82f, 1.0f), false, false, true);
 
-        if (render::is_vk_clicked(VK_INSERT)) {
+        if (render::is_vk_clicked(VK_F1)) {
             render::show_menu = !render::show_menu;
         }
 
-        if (render::show_menu) {
-            gui::menu::draw(canvas);
-        }
+        // Menu is now rendered via ImGui through DX11 Present hook (dx_hook.h)
 
         if (!viewport) {
             diagnostics::end_frame();
@@ -518,9 +516,18 @@ namespace ark {
             return;
         }
 
+        // Initialize DX11 Present hook for ImGui menu rendering
+        init_status::current_step = "Installing DX11 hook";
+        dbg::log_ex(dbg::Level::Info, dbg::Init, "Installing DX11 Present hook for ImGui...");
+        if (dx_hook::initialize()) {
+            dbg::success("DX11 Present hook installed for ImGui menu");
+        } else {
+            dbg::warn("DX11 Present hook failed - menu will not render (ESP still works)");
+        }
+
         init_status::current_step = "Complete";
         dbg::log_ex(dbg::Level::Info, dbg::Init, "Initialization complete");
-        dbg::log_ex(dbg::Level::Info, dbg::Init, "Press INSERT to toggle menu");
+        dbg::log_ex(dbg::Level::Info, dbg::Init, "Press F1 to toggle menu");
     }
 
 }

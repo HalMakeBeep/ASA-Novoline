@@ -18,7 +18,7 @@ namespace gui {
             float width = canvas->ClipX();
             float height = canvas->ClipY();
 
-            if (ZeroGUI::Window("HalMakeBeep", &position, FVector2D{ 750.0f, 600.0f }, render::show_menu, width, height)) {
+            if (ZeroGUI::Window("PRISME", &position, FVector2D{ 750.0f, 600.0f }, render::show_menu, width, height)) {
                 static int tab = 0;
                 const FVector2D tab_size{ 140.0f, 25.0f };
 

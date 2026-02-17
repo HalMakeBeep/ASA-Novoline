@@ -46,6 +46,7 @@ inline std::uintptr_t game = 0;
 #include "gui/render.h"
 #include "gui/zerogui.h"
 #include "gui/menu.h"
+#include "gui/dx_hook.h"
 
 #include "features/radar.h"
 #include "features/aimbot.h"
