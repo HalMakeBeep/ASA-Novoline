@@ -40,9 +40,8 @@ namespace ark {
             render::show_menu = !render::show_menu;
         }
 
-        if (render::show_menu) {
-            gui::menu::draw(canvas);
-        }
+        // Menu is now rendered via ImGui DX12 hook (dx_hook.h)
+        // ZeroGUI menu draw removed — ImGui handles it directly on the swapchain
 
         if (!viewport) {
             diagnostics::end_frame();
@@ -518,8 +517,12 @@ namespace ark {
             return;
         }
 
-        // DX11/ImGui overlay DISABLED — using ZeroGUI for testing
-        // if (dx_hook::initialize()) { ... }
+        // DX12 direct swapchain hook — renders ImGui on game's backbuffer
+        if (dx_hook::initialize()) {
+            dbg::log_ex(dbg::Level::Info, dbg::Init, "DX12 ImGui hook initialized");
+        } else {
+            dbg::log_ex(dbg::Level::Warn, dbg::Init, "DX12 ImGui hook failed — menu will not be available");
+        }
 
         init_status::current_step = "Complete";
         dbg::log_ex(dbg::Level::Info, dbg::Init, "Initialization complete");
