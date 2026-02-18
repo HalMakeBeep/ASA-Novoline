@@ -6,7 +6,7 @@
 
 namespace render {
     // Global state
-    inline bool show_menu = false;
+    inline bool show_menu = true;
     inline bool draw_cursor = true;
     inline UWorld* world = nullptr;
     inline APlayerController* controller = nullptr;

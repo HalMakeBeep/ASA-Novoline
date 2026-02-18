@@ -72,31 +72,34 @@ namespace ZeroGUI
 {
 	namespace Colors
 	{
-		flinearcolor Accent{ 0.0f, 0.60f, 1.0f, 1.0f };
+		flinearcolor Accent{ 0.25f, 0.75f, 0.71f, 1.0f };          // Teal
 
-		flinearcolor Text{ 1.0f, 1.0f, 1.0f, 1.0f };
+		flinearcolor Text{ 0.92f, 0.92f, 0.95f, 1.0f };
 		flinearcolor Text_Shadow{ 0.0f, 0.0f, 0.0f, 0.50f };
 		flinearcolor Text_Outline{ 0.0f, 0.0f, 0.0f, 0.35f };
+		flinearcolor Text_Dim{ 0.55f, 0.55f, 0.62f, 1.0f };
 
-		flinearcolor Window_Background{ 0.06f, 0.06f, 0.06f, 1.0f };
-		flinearcolor Window_Header{ 0.12f, 0.24f, 0.47f, 1.0f };
+		flinearcolor Window_Background{ 0.05f, 0.05f, 0.07f, 0.95f };
+		flinearcolor Window_Header{ 0.07f, 0.07f, 0.09f, 1.0f };
+		flinearcolor Sidebar_Bg{ 0.04f, 0.04f, 0.06f, 1.0f };
+		flinearcolor Sidebar_Active{ 0.08f, 0.08f, 0.12f, 1.0f };
 
-		flinearcolor Button_Idle{ 0.08f, 0.08f, 0.08f, 1.0f };
-		flinearcolor Button_Hovered{ 0.16f, 0.31f, 0.63f, 1.0f };
-		flinearcolor Button_Active{ 0.24f, 0.39f, 0.71f, 1.0f };
+		flinearcolor Button_Idle{ 0.10f, 0.10f, 0.13f, 1.0f };
+		flinearcolor Button_Hovered{ 0.20f, 0.55f, 0.52f, 1.0f };
+		flinearcolor Button_Active{ 0.25f, 0.75f, 0.71f, 1.0f };
 
-		flinearcolor Checkbox_Idle{ 0.08f, 0.08f, 0.08f, 1.0f };
-		flinearcolor Checkbox_Hovered{ 0.16f, 0.31f, 0.63f, 1.0f };
-		flinearcolor Checkbox_Enabled{ 0.24f, 0.39f, 0.71f, 1.0f };
+		flinearcolor Checkbox_Idle{ 0.10f, 0.10f, 0.13f, 1.0f };
+		flinearcolor Checkbox_Hovered{ 0.15f, 0.40f, 0.38f, 1.0f };
+		flinearcolor Checkbox_Enabled{ 0.25f, 0.75f, 0.71f, 1.0f };
 
-		flinearcolor Combobox_Idle{ 0.08f, 0.08f, 0.08f, 1.0f };
-		flinearcolor Combobox_Hovered{ 0.16f, 0.31f, 0.63f, 1.0f };
+		flinearcolor Combobox_Idle{ 0.10f, 0.10f, 0.13f, 1.0f };
+		flinearcolor Combobox_Hovered{ 0.15f, 0.40f, 0.38f, 1.0f };
 		flinearcolor Combobox_Elements{ 0.78f, 0.78f, 0.78f, 1.0f };
 
-		flinearcolor Slider_Idle{ 0.08f, 0.08f, 0.08f, 1.0f };
-		flinearcolor Slider_Hovered{ 0.08f, 0.08f, 0.08f, 1.0f };
-		flinearcolor Slider_Progress{ 0.24f, 0.39f, 0.71f, 1.0f };
-		flinearcolor Slider_Button{ 0.24f, 0.39f, 0.71f, 1.0f };
+		flinearcolor Slider_Idle{ 0.10f, 0.10f, 0.13f, 1.0f };
+		flinearcolor Slider_Hovered{ 0.12f, 0.12f, 0.16f, 1.0f };
+		flinearcolor Slider_Progress{ 0.25f, 0.75f, 0.71f, 1.0f };
+		flinearcolor Slider_Button{ 0.25f, 0.75f, 0.71f, 1.0f };
 
 		flinearcolor ColorPicker_Background{ 0.02f, 0.02f, 0.02f, 1.0f };
 	}

@@ -40,6 +40,10 @@ namespace ark {
             render::show_menu = !render::show_menu;
         }
 
+        if (render::show_menu) {
+            gui::menu::draw(canvas);
+        }
+
         if (!viewport) {
             diagnostics::end_frame();
             return;
@@ -514,14 +518,8 @@ namespace ark {
             return;
         }
 
-        // Initialize DX11 Present hook for ImGui menu rendering
-        init_status::current_step = "Installing DX11 hook";
-        dbg::log_ex(dbg::Level::Info, dbg::Init, "Installing DX11 Present hook for ImGui...");
-        if (dx_hook::initialize()) {
-            dbg::success("DX11 Present hook installed for ImGui menu");
-        } else {
-            dbg::warn("DX11 Present hook failed - menu will not render (ESP still works)");
-        }
+        // DX11/ImGui overlay DISABLED — using ZeroGUI for testing
+        // if (dx_hook::initialize()) { ... }
 
         init_status::current_step = "Complete";
         dbg::log_ex(dbg::Level::Info, dbg::Init, "Initialization complete");
