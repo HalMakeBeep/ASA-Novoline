@@ -489,39 +489,38 @@ namespace ark {
             }
         }
 
-        if (found_idx < 0) {
-            dbg::error("FATAL: Could not find DrawTransition vtable index!");
-            dbg::error("None of the scanned indices passed a UCanvas-like argument.");
-            init_status::last_error = "DrawTransition index not found";
-            return;
-        }
-
-        dbg::success("DrawTransition vtable index found: %d", found_idx);
-
-        // Now install the real hook at the correct index
-        init_status::current_step = "Installing DrawTransition hook";
-        dbg::log("Installing DrawTransition hook at vtable index %d...", found_idx);
-
-        hooks::DrawTransition_Original = ::vmt<hooks::DrawTransition_t>(
-            std::uintptr_t(viewport),
-            std::uintptr_t(hooks::DrawTransition_Hook),
-            found_idx
-        );
-
-        if (hooks::DrawTransition_Original) {
-            init_status::hook_installed = true;
-            dbg::success("DrawTransition hook installed! Original=0x%p", hooks::DrawTransition_Original);
-        } else {
-            dbg::error("DrawTransition hook FAILED!");
-            init_status::last_error = "Hook installation failed";
-            return;
-        }
-
-        // DX12 direct swapchain hook — renders ImGui on game's backbuffer
+        // DX12 ImGui hook — independent of DrawTransition, renders ImGui on game's swapchain
+        // Must init BEFORE DrawTransition scan since that scan can fail
         if (dx_hook::initialize()) {
             dbg::log_ex(dbg::Level::Info, dbg::Init, "DX12 ImGui hook initialized");
         } else {
             dbg::log_ex(dbg::Level::Warn, dbg::Init, "DX12 ImGui hook failed — menu will not be available");
+        }
+
+        if (found_idx < 0) {
+            dbg::error("Could not find DrawTransition vtable index — ESP/aimbot drawing disabled");
+            dbg::error("ImGui menu still available via DX hook (F1)");
+            init_status::last_error = "DrawTransition index not found";
+        } else {
+            dbg::success("DrawTransition vtable index found: %d", found_idx);
+
+            // Now install the real hook at the correct index
+            init_status::current_step = "Installing DrawTransition hook";
+            dbg::log("Installing DrawTransition hook at vtable index %d...", found_idx);
+
+            hooks::DrawTransition_Original = ::vmt<hooks::DrawTransition_t>(
+                std::uintptr_t(viewport),
+                std::uintptr_t(hooks::DrawTransition_Hook),
+                found_idx
+            );
+
+            if (hooks::DrawTransition_Original) {
+                init_status::hook_installed = true;
+                dbg::success("DrawTransition hook installed! Original=0x%p", hooks::DrawTransition_Original);
+            } else {
+                dbg::error("DrawTransition hook FAILED!");
+                init_status::last_error = "Hook installation failed";
+            }
         }
 
         init_status::current_step = "Complete";
