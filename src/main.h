@@ -36,12 +36,8 @@ namespace ark {
 
         render::text(L"Prisme ASA", FVector2D(10.0, 10.0), FLinearColor(0.54f, 0.39f, 0.82f, 1.0f), false, false, true);
 
-        if (render::is_vk_clicked(VK_F1)) {
-            render::show_menu = !render::show_menu;
-        }
-
-        // Menu is now rendered via ImGui DX12 hook (dx_hook.h)
-        // ZeroGUI menu draw removed — ImGui handles it directly on the swapchain
+        // F1 toggle handled by dx_hook::hkPresent (no duplicate here)
+        // Menu rendered via ImGui DX12 hook (dx_hook.h)
 
         if (!viewport) {
             diagnostics::end_frame();
@@ -475,7 +471,15 @@ namespace ark {
             dbg::warn("Could not get UEngine from game instance");
         }
 
-        // Scan for the correct DrawTransition vtable index
+        // DX12 ImGui hook — independent of DrawTransition, renders ImGui on game's swapchain
+        // Init BEFORE DrawTransition scan since that scan takes 20+ seconds and can fail
+        if (dx_hook::initialize()) {
+            dbg::log_ex(dbg::Level::Info, dbg::Init, "DX12 ImGui hook initialized");
+        } else {
+            dbg::log_ex(dbg::Level::Warn, dbg::Init, "DX12 ImGui hook failed — menu will not be available");
+        }
+
+        // Scan for the correct DrawTransition vtable index (for ESP/aimbot UCanvas rendering)
         init_status::current_step = "Scanning for DrawTransition vtable index";
         dbg::info("Scanning for DrawTransition vtable index (current guess: %d)...", offsets::DrawTransitionVIdx);
 
@@ -487,14 +491,6 @@ namespace ark {
             if (found_idx < 0) {
                 found_idx = hooks::find_draw_transition_index(std::uintptr_t(viewport), 141, 180);
             }
-        }
-
-        // DX12 ImGui hook — independent of DrawTransition, renders ImGui on game's swapchain
-        // Must init BEFORE DrawTransition scan since that scan can fail
-        if (dx_hook::initialize()) {
-            dbg::log_ex(dbg::Level::Info, dbg::Init, "DX12 ImGui hook initialized");
-        } else {
-            dbg::log_ex(dbg::Level::Warn, dbg::Init, "DX12 ImGui hook failed — menu will not be available");
         }
 
         if (found_idx < 0) {

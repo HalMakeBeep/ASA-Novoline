@@ -16,7 +16,9 @@
       "Bash(cmd.exe /c \"\"\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\18\\\\Community\\\\Common7\\\\Tools\\\\VsDevCmd.bat\"\" -arch=amd64 >nul 2>&1 && \"\"C:\\\\Program Files\\\\JetBrains\\\\CLion 2025.3.2\\\\bin\\\\cmake\\\\win\\\\x64\\\\bin\\\\cmake.exe\"\" --build \"\"c:\\\\Users\\\\Yeis\\\\Desktop\\\\PrismeASA\\\\cmake-build-debug\"\" --target ASA-Internal 2>&1\")",
       "Bash(cmd.exe /c \"call \"\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\18\\\\Community\\\\Common7\\\\Tools\\\\VsDevCmd.bat\"\" -arch=amd64 && \"\"C:\\\\Program Files\\\\JetBrains\\\\CLion 2025.3.2\\\\bin\\\\cmake\\\\win\\\\x64\\\\bin\\\\cmake.exe\"\" --build \"\"c:\\\\Users\\\\Yeis\\\\Desktop\\\\PrismeASA\\\\cmake-build-debug\"\" --target ASA-Internal\")",
       "Bash(cmd.exe //c:*)",
-      "Bash(cmd.exe /c build_tmp.bat)"
+      "Bash(cmd.exe /c build_tmp.bat)",
+      "Bash(\"/c/Program Files/CMake/bin/cmake.exe\" --build /c/Users/Yeis/Desktop/PrismeASA/cmake-build-debug --target PrismeASA)",
+      "Bash(cmd.exe /c \"\"\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\Common7\\\\Tools\\\\VsDevCmd.bat\"\" >nul 2>&1 && where cmake\")"
     ]
   }
 }
