@@ -35,7 +35,9 @@ namespace dx_hook {
 
     // Game DX12 objects (captured)
     inline ID3D12Device*       g_d3d12_device  = nullptr;
-    inline ID3D12CommandQueue* g_command_queue  = nullptr;
+    inline ID3D12CommandQueue* g_command_queue  = nullptr; // any direct queue (for init gate)
+    inline ID3D12CommandQueue* g_render_queue   = nullptr; // locked queue for ImGui (set once at init)
+    inline ID3D12CommandQueue* g_last_queue     = nullptr; // most recent direct queue (volatile)
 
     // Our own DX12 rendering objects
     inline ID3D12DescriptorHeap*      g_rtv_heap   = nullptr;
@@ -51,20 +53,15 @@ namespace dx_hook {
 
     inline DXGI_FORMAT  g_rtv_format = DXGI_FORMAT_R8G8B8A8_UNORM;
 
-    // ── ExecuteCommandLists hook — tracks game's DIRECT command queue ──
-    // Always update to the MOST RECENT direct queue, not just the first one.
-    // UE5 may create the actual rendering queue after the initial setup queue.
+    // ── ExecuteCommandLists hook — tracks the most recent DIRECT queue ──
     inline void WINAPI hkExecuteCommandLists(
         ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists)
     {
         if (queue) {
             D3D12_COMMAND_QUEUE_DESC desc = queue->GetDesc();
             if (desc.Type == D3D12_COMMAND_LIST_TYPE_DIRECT) {
-                if (g_command_queue != queue) {
-                    dbg::log_ex(dbg::Level::Warn, dbg::Init,
-                        "[DX12] Tracking DIRECT command queue: %p", queue);
-                }
-                g_command_queue = queue;
+                if (!g_command_queue) g_command_queue = queue;
+                g_last_queue = queue; // always track latest
             }
         }
         oExecuteCommandLists(queue, count, lists);
@@ -222,6 +219,7 @@ namespace dx_hook {
             return false;
         }
         g_fence_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+
         dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] Fence + command objects created");
 
         // Init ImGui — only once (guard against re-entry after exception)
@@ -287,7 +285,13 @@ namespace dx_hook {
             // (legacy API doesn't set CommandQueue, causing null crash on font upload)
             ImGui_ImplDX12_InitInfo init_info;
             init_info.Device             = g_d3d12_device;
-            init_info.CommandQueue       = g_command_queue;
+            // Lock the render queue — ImGui resources (font texture) will be
+            // uploaded on this queue. We MUST use this same queue for all future
+            // rendering, or cross-queue resource access causes DEVICE_HUNG.
+            g_render_queue = g_last_queue ? g_last_queue : g_command_queue;
+            dbg::log_ex(dbg::Level::Warn, dbg::Init,
+                "[DX12] Locked render queue: %p", g_render_queue);
+            init_info.CommandQueue       = g_render_queue;
             init_info.NumFramesInFlight  = (int)g_buffer_count;
             init_info.RTVFormat          = g_rtv_format;
             init_info.SrvDescriptorHeap  = g_srv_heap;
@@ -314,7 +318,7 @@ namespace dx_hook {
     inline int g_render_count = 0;
 
     inline void render_frame(IDXGISwapChain* swap) {
-        if (!g_command_queue) return;
+        if (!g_render_queue) return;
         if (!render::show_menu) {
             g_vmouse_active = false;
             return;
@@ -370,31 +374,26 @@ namespace dx_hook {
 
         if (g_render_count <= 3) {
             dbg::log_ex(dbg::Level::Warn, dbg::Init,
-                "[DX12] render_frame #%d, idx=%u, buf=%p", g_render_count, idx, backbuffer);
+                "[DX12] render_frame #%d, idx=%u, buf=%p, rq=%p",
+                g_render_count, idx, backbuffer, g_render_queue);
         }
 
-        // Barrier: PRESENT → RENDER_TARGET
-        D3D12_RESOURCE_BARRIER barrier = {};
-        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition.pResource   = backbuffer;
-        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-        barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        g_cmd_list->ResourceBarrier(1, &barrier);
+        // ── No legacy barriers! ──
+        // UE5 uses D3D12 enhanced barriers (Agility SDK). Legacy ResourceBarrier
+        // transitions (PRESENT→RT) crash the GPU with DEVICE_HUNG 0x887A002B.
+        // The backbuffer is already accessible for rendering without transitions.
 
         g_cmd_list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
 
         ID3D12DescriptorHeap* heaps[] = { g_srv_heap };
         g_cmd_list->SetDescriptorHeaps(1, heaps);
 
-        // Viewport + scissor from backbuffer dimensions
         D3D12_RESOURCE_DESC rdesc = backbuffer->GetDesc();
         D3D12_VIEWPORT vp = { 0, 0, (float)rdesc.Width, (float)rdesc.Height, 0, 1.0f };
         D3D12_RECT     sr = { 0, 0, (LONG)rdesc.Width, (LONG)rdesc.Height };
         g_cmd_list->RSSetViewports(1, &vp);
         g_cmd_list->RSSetScissorRects(1, &sr);
 
-        // ImGui frame
         feed_imgui_input();
         ImGui::GetIO().MouseDrawCursor = true;
 
@@ -404,22 +403,16 @@ namespace dx_hook {
         ImGui::Render();
         ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_cmd_list);
 
-        // Barrier: RENDER_TARGET → PRESENT
-        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_PRESENT;
-        g_cmd_list->ResourceBarrier(1, &barrier);
-
         hr = g_cmd_list->Close();
         if (SUCCEEDED(hr)) {
             ID3D12CommandList* lists[] = { g_cmd_list };
-            g_command_queue->ExecuteCommandLists(1, lists);
+            g_render_queue->ExecuteCommandLists(1, lists);
 
             g_fence_value++;
             g_fence_values[idx] = g_fence_value;
-            g_command_queue->Signal(g_fence, g_fence_value);
+            g_render_queue->Signal(g_fence, g_fence_value);
         }
 
-        // Release our reference (GetBuffer adds a ref each call)
         backbuffer->Release();
 
         if (g_render_count <= 3) {

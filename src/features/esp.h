@@ -412,6 +412,125 @@ namespace features {
             }
         }
 
+        // Bone indices for ARK SA humanoid skeleton
+        // Adjust these if skeleton lines don't align correctly in-game
+        namespace bones {
+            constexpr int Head = 9;
+            constexpr int Neck = 8;
+            constexpr int Spine3 = 7;       // upper chest
+            constexpr int Spine1 = 5;       // lower spine
+            constexpr int Pelvis = 1;
+
+            constexpr int L_UpperArm = 27;
+            constexpr int L_ForeArm = 28;
+            constexpr int L_Hand = 29;
+
+            constexpr int R_UpperArm = 51;
+            constexpr int R_ForeArm = 52;
+            constexpr int R_Hand = 53;
+
+            constexpr int L_Thigh = 67;
+            constexpr int L_Calf = 68;
+            constexpr int L_Foot = 69;
+
+            constexpr int R_Thigh = 71;
+            constexpr int R_Calf = 72;
+            constexpr int R_Foot = 73;
+        }
+
+        struct BoneConnection { int from; int to; };
+        inline constexpr BoneConnection skeleton_connections[] = {
+            { bones::Head,       bones::Neck },
+            { bones::Neck,       bones::Spine3 },
+            { bones::Spine3,     bones::Spine1 },
+            { bones::Spine1,     bones::Pelvis },
+            // Arms
+            { bones::Spine3,     bones::L_UpperArm },
+            { bones::L_UpperArm, bones::L_ForeArm },
+            { bones::L_ForeArm,  bones::L_Hand },
+            { bones::Spine3,     bones::R_UpperArm },
+            { bones::R_UpperArm, bones::R_ForeArm },
+            { bones::R_ForeArm,  bones::R_Hand },
+            // Legs
+            { bones::Pelvis,     bones::L_Thigh },
+            { bones::L_Thigh,    bones::L_Calf },
+            { bones::L_Calf,     bones::L_Foot },
+            { bones::Pelvis,     bones::R_Thigh },
+            { bones::R_Thigh,    bones::R_Calf },
+            { bones::R_Calf,     bones::R_Foot },
+        };
+
+        inline void draw_skeleton(APrimalCharacter* character, APlayerController* controller, FLinearColor color) {
+            if (!character || !controller) return;
+
+            USkeletalMeshComponent* mesh = nullptr;
+            __try {
+                mesh = character->GetMesh();
+            } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+            if (!mesh) return;
+
+            for (const auto& conn : skeleton_connections) {
+                FVector bone_from, bone_to;
+                __try {
+                    bone_from = mesh->GetBoneLocation(conn.from);
+                    bone_to = mesh->GetBoneLocation(conn.to);
+                } __except (EXCEPTION_EXECUTE_HANDLER) { continue; }
+
+                // Skip if bone positions seem invalid (at origin)
+                if (bone_from.x == 0 && bone_from.y == 0 && bone_from.z == 0) continue;
+                if (bone_to.x == 0 && bone_to.y == 0 && bone_to.z == 0) continue;
+
+                FVector2D screen_from, screen_to;
+                if (!controller->ProjectWorldToScreen(bone_from, &screen_from)) continue;
+                if (!controller->ProjectWorldToScreen(bone_to, &screen_to)) continue;
+
+                render::line(screen_from, screen_to, color, 1.5f);
+            }
+        }
+
+        inline void draw_health_bar(const ScreenBox& box, APrimalCharacter* character) {
+            if (!box.valid || !character) return;
+
+            float health = 0.0f, max_health = 0.0f;
+            __try {
+                health = character->GetHealth();
+                max_health = character->GetMaxHealth();
+            } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+
+            if (max_health <= 0.0f) return;
+            float ratio = health / max_health;
+            if (ratio < 0.0f) ratio = 0.0f;
+            if (ratio > 1.0f) ratio = 1.0f;
+
+            // Draw health bar to the left of the ESP box
+            float bar_width = 3.0f;
+            float bar_height = (float)box.height;
+            float bar_x = (float)box.top_left.x - bar_width - 3.0f;
+            float bar_y = (float)box.top_left.y;
+
+            // Background
+            render::filled_box(FVector2D(bar_x - 1, bar_y - 1),
+                FVector2D(bar_width + 2, bar_height + 2),
+                FLinearColor(0.0f, 0.0f, 0.0f, 0.6f));
+
+            // Health color: green → yellow → red
+            FLinearColor bar_color;
+            if (ratio > 0.5f) {
+                float t = (ratio - 0.5f) * 2.0f;
+                bar_color = FLinearColor(1.0f - t, 1.0f, 0.0f, 1.0f); // yellow→green
+            } else {
+                float t = ratio * 2.0f;
+                bar_color = FLinearColor(1.0f, t, 0.0f, 1.0f); // red→yellow
+            }
+
+            // Filled portion (bottom-up)
+            float fill_height = bar_height * ratio;
+            float fill_y = bar_y + bar_height - fill_height;
+            render::filled_box(FVector2D(bar_x, fill_y),
+                FVector2D(bar_width, fill_height),
+                bar_color);
+        }
+
         inline bool is_better_target(bool is_player, double distance_to_crosshair, double distance_to_camera) {
             if (!best_target.character) return true;
 
@@ -530,7 +649,7 @@ namespace features {
                 }
 
                 if (config::radar::enabled && config::radar::show_players) {
-                    radar::add_point(location, color);
+                    radar::add_point(location, color, radar::EntityType::Player);
                 }
 
                 ScreenBox box;
@@ -538,6 +657,14 @@ namespace features {
 
                 if ((config::player_esp::box || config::player_esp::cornered_box) && has_box) {
                     draw_box(box, color, config::player_esp::cornered_box);
+                }
+
+                if (config::player_esp::skeleton) {
+                    draw_skeleton(character, controller, color);
+                }
+
+                if (config::player_esp::show_health && has_box) {
+                    draw_health_bar(box, character);
                 }
 
                 if (config::player_esp::snapline) {
@@ -629,14 +756,41 @@ namespace features {
                     screen_pos = aim_screen_pos;
                 }
 
-                bool is_wild = true;
-                FLinearColor color = FLinearColor(config::dino_esp::wild_color[0], config::dino_esp::wild_color[1],
-                    config::dino_esp::wild_color[2], config::dino_esp::wild_color[3]);
+                // Detect tamed vs wild via team ID (wild = team 0)
+                int dino_team = dino->GetTargetingTeam();
+                bool is_wild = (dino_team == 0);
 
-                if (!config::dino_esp::show_wild && is_wild) { diagnostics::add_dino_skipped(); continue; }
+                // Determine if friendly (same team/allied) or enemy tamed
+                bool is_friendly = false;
+                if (!is_wild && local_pawn) {
+                    int local_team = local_pawn->GetTargetingTeam();
+                    if (local_team > 0 && dino_team == local_team) {
+                        is_friendly = true;
+                    } else if (local_team > 0 && local_pawn->IsAlliedWithOtherTeam(dino_team)) {
+                        is_friendly = true;
+                    }
+                }
+
+                // Filter based on settings
+                if (is_wild && !config::dino_esp::show_wild) { diagnostics::add_dino_skipped(); continue; }
+                if (!is_wild && !config::dino_esp::show_tamed) { diagnostics::add_dino_skipped(); continue; }
+                if (!is_wild && is_friendly && !config::dino_esp::show_friendly) { diagnostics::add_dino_skipped(); continue; }
+
+                // Pick color based on type
+                FLinearColor color;
+                if (is_wild) {
+                    color = FLinearColor(config::dino_esp::wild_color[0], config::dino_esp::wild_color[1],
+                        config::dino_esp::wild_color[2], config::dino_esp::wild_color[3]);
+                } else if (is_friendly) {
+                    color = FLinearColor(config::dino_esp::friendly_color[0], config::dino_esp::friendly_color[1],
+                        config::dino_esp::friendly_color[2], config::dino_esp::friendly_color[3]);
+                } else {
+                    color = FLinearColor(config::dino_esp::tamed_color[0], config::dino_esp::tamed_color[1],
+                        config::dino_esp::tamed_color[2], config::dino_esp::tamed_color[3]);
+                }
 
                 if (config::radar::enabled && config::radar::show_dinos) {
-                    radar::add_point(location, color);
+                    radar::add_point(location, color, is_wild ? radar::EntityType::WildDino : radar::EntityType::TamedDino);
                 }
 
                 ScreenBox box;
@@ -665,7 +819,8 @@ namespace features {
                         FLinearColor::White(), true, false, config::style::text_outlined);
                 }
 
-                if (config::aimbot::target_wild_dinos && is_wild) {
+                if ((config::aimbot::target_wild_dinos && is_wild) ||
+                    (config::aimbot::target_enemy_tamed && !is_wild && !is_friendly)) {
                     consider_target(dino, aim_location, aim_screen_pos, center, camera_location, fov, camera_fov, false);
                 }
                 diagnostics::add_dino_processed();

@@ -381,6 +381,7 @@ namespace imgui_menu {
             toggle_row("Box", &config::player_esp::box);
             toggle_row("Cornered Box", &config::player_esp::cornered_box);
             toggle_row("Skeleton", &config::player_esp::skeleton);
+            toggle_row("Health Bar", &config::player_esp::show_health);
             toggle_row("Snapline", &config::player_esp::snapline);
             toggle_row("Distance", &config::player_esp::show_distance);
             toggle_row("Name", &config::player_esp::show_name);
@@ -409,9 +410,14 @@ namespace imgui_menu {
         else if (vt == 2) {
             toggle_row("Enable Radar", &config::radar::enabled);
             if (config::radar::enabled) {
+                toggle_row("Show Players", &config::radar::show_players);
+                toggle_row("Show Dinos", &config::radar::show_dinos);
+                toggle_row("Show Grid", &config::radar::show_grid);
+                toggle_row("Show Compass", &config::radar::show_compass);
+                slider_row("Range", &config::radar::range, 10.f, 500.f);
                 slider_row("Size", &config::radar::size, 100.f, 400.f);
-                slider_row("Position X", &config::radar::pos_x, 0.f, 500.f);
-                slider_row("Position Y", &config::radar::pos_y, 0.f, 500.f);
+                slider_row("Position X", &config::radar::pos_x, 0.f, 1500.f);
+                slider_row("Position Y", &config::radar::pos_y, 0.f, 1000.f);
             }
         }
     }

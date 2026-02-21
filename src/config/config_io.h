@@ -109,6 +109,8 @@ namespace io {
         w_bool("radar.enabled", radar::enabled);
         w_bool("radar.show_players", radar::show_players);
         w_bool("radar.show_dinos", radar::show_dinos);
+        w_bool("radar.show_grid", radar::show_grid);
+        w_bool("radar.show_compass", radar::show_compass);
         w_float("radar.range", radar::range);
         w_float("radar.pos_x", radar::pos_x);
         w_float("radar.pos_y", radar::pos_y);
@@ -204,6 +206,8 @@ namespace io {
         r_bool("radar.enabled", radar::enabled);
         r_bool("radar.show_players", radar::show_players);
         r_bool("radar.show_dinos", radar::show_dinos);
+        r_bool("radar.show_grid", radar::show_grid);
+        r_bool("radar.show_compass", radar::show_compass);
         r_float("radar.range", radar::range);
         r_float("radar.pos_x", radar::pos_x);
         r_float("radar.pos_y", radar::pos_y);

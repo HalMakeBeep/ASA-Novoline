@@ -92,6 +92,8 @@ namespace radar {
     inline bool enabled = false;
     inline bool show_players = true;
     inline bool show_dinos = true;
+    inline bool show_grid = true;
+    inline bool show_compass = true;
     inline float range = 100.0f;
     inline float pos_x = 50.0f;
     inline float pos_y = 50.0f;
@@ -194,6 +196,8 @@ namespace settings {
         inline auto& enable = config::radar::enabled;
         inline auto& show_players = config::radar::show_players;
         inline auto& show_dinos = config::radar::show_dinos;
+        inline auto& show_grid = config::radar::show_grid;
+        inline auto& show_compass = config::radar::show_compass;
         inline auto& range = config::radar::range;
         inline auto& positionx = config::radar::pos_x;
         inline auto& positiony = config::radar::pos_y;

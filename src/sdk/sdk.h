@@ -182,6 +182,30 @@ public:
         }
         return params.ret;
     }
+
+    float GetHealth() {
+        struct { float ret; } params = {};
+        static UObject* func = nullptr;
+        if (!func) func = UObject::StaticFindObject(nullptr, nullptr, L"Pawn.GetHealth", false);
+        if (func) {
+            __try { ProcessEvent(func, &params); }
+            __except (EXCEPTION_EXECUTE_HANDLER) { return 0.0f; }
+            return params.ret;
+        }
+        return 0.0f;
+    }
+
+    float GetMaxHealth() {
+        struct { float ret; } params = {};
+        static UObject* func = nullptr;
+        if (!func) func = UObject::StaticFindObject(nullptr, nullptr, L"Pawn.GetMaxHealth", false);
+        if (func) {
+            __try { ProcessEvent(func, &params); }
+            __except (EXCEPTION_EXECUTE_HANDLER) { return 0.0f; }
+            return params.ret;
+        }
+        return 0.0f;
+    }
 };
 
 class AShooterCharacter : public APrimalCharacter {

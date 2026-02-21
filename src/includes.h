@@ -44,8 +44,6 @@ inline std::uintptr_t game = 0;
 #include "config/profile_manager.h"
 
 #include "gui/render.h"
-#include "gui/zerogui.h"
-#include "gui/menu.h"
 #include "gui/dx_hook.h"
 
 #include "features/radar.h"
