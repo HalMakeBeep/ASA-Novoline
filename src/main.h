@@ -231,11 +231,19 @@ namespace ark {
         volatile bool   scan_waiting = true;
         volatile void*  scan_arg1 = nullptr;   // 'this' pointer
         volatile void*  scan_arg2 = nullptr;   // first real argument
+        volatile std::uintptr_t scan_original = 0; // original function to call through
 
         void __cdecl Scan_Probe(void* self, void* arg1) {
             scan_arg1 = self;
             scan_arg2 = arg1;
             scan_waiting = false;
+
+            // Call through to original function to avoid crashing the game
+            if (scan_original) {
+                auto fn = (void(__cdecl*)(void*, void*))scan_original;
+                __try { fn(self, arg1); }
+                __except (EXCEPTION_EXECUTE_HANDLER) {}
+            }
         }
 
         void DrawTransition_Hook(UGameViewportClient* viewport, UCanvas* canvas) {
@@ -280,6 +288,7 @@ namespace ark {
                 scan_arg1 = nullptr;
                 scan_arg2 = nullptr;
                 scan_index = idx;
+                scan_original = original_fn; // store for call-through
 
                 // Swap vtable entry with our probe
                 DWORD old_protect;
@@ -287,8 +296,9 @@ namespace ark {
                 vtable[idx] = (std::uintptr_t)&Scan_Probe;
                 VirtualProtect(&vtable[idx], sizeof(std::uintptr_t), old_protect, &old_protect);
 
-                // Wait for a call (max ~200ms)
-                for (int w = 0; w < 20 && scan_waiting; w++) {
+                // Wait for a call — longer timeout for single index probe, shorter for range scan
+                int max_wait = (start == end) ? 50 : 20; // 500ms for single, 200ms for range
+                for (int w = 0; w < max_wait && scan_waiting; w++) {
                     Sleep(10);
                 }
 
@@ -296,6 +306,7 @@ namespace ark {
                 VirtualProtect(&vtable[idx], sizeof(std::uintptr_t), PAGE_READWRITE, &old_protect);
                 vtable[idx] = original_fn;
                 VirtualProtect(&vtable[idx], sizeof(std::uintptr_t), old_protect, &old_protect);
+                scan_original = 0;
 
                 if (scan_waiting) {
                     continue;
@@ -483,7 +494,14 @@ namespace ark {
         init_status::current_step = "Scanning for DrawTransition vtable index";
         dbg::info("Scanning for DrawTransition vtable index (current guess: %d)...", offsets::DrawTransitionVIdx);
 
-        int found_idx = hooks::find_draw_transition_index(std::uintptr_t(viewport), 100, 140);
+        // Try the known index first with a longer timeout (500ms) before scanning ranges
+        int found_idx = hooks::find_draw_transition_index(std::uintptr_t(viewport),
+            offsets::DrawTransitionVIdx, offsets::DrawTransitionVIdx);
+
+        if (found_idx < 0) {
+            dbg::info("Known index %d not responding, scanning 100-140...", offsets::DrawTransitionVIdx);
+            found_idx = hooks::find_draw_transition_index(std::uintptr_t(viewport), 100, 140);
+        }
 
         if (found_idx < 0) {
             dbg::warn("Could not auto-detect DrawTransition index in 100-140, trying wider range 60-180...");

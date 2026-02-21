@@ -25,9 +25,9 @@ namespace dx_hook {
     inline PresentFn             oPresent             = nullptr;
     inline ExecuteCommandListsFn oExecuteCommandLists = nullptr;
 
-    inline bool g_initialized    = false;
+    inline bool g_initialized    = false;  // DX12 device objects created
     inline bool g_init_failed    = false;
-    inline bool g_imgui_inited   = false;  // tracks if ImGui context + backend already created
+    inline bool g_imgui_ready    = false;  // ImGui context + backend initialized (deferred to first F1)
     inline int  g_frame_count  = 0;
     inline bool g_rendering    = false;
     inline HWND g_game_hwnd    = nullptr;
@@ -222,95 +222,103 @@ namespace dx_hook {
 
         dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] Fence + command objects created");
 
-        // Init ImGui — only once (guard against re-entry after exception)
-        if (!g_imgui_inited) {
-            ImGui::CreateContext();
-            ImGuiIO& io = ImGui::GetIO();
-            io.ConfigFlags    |= ImGuiConfigFlags_NavEnableKeyboard;
-            io.IniFilename     = nullptr;
-            io.MouseDrawCursor = true;
-
-            // DPI scale
-            float dpi_scale = 1.0f;
-            if (sc_desc.BufferDesc.Height >= 2160) dpi_scale = 1.5f;
-            else if (sc_desc.BufferDesc.Height >= 1440) dpi_scale = 1.25f;
-
-            // Load fonts
-            ImFontConfig font_cfg;
-            font_cfg.OversampleH       = 3;
-            font_cfg.OversampleV       = 2;
-            font_cfg.PixelSnapH        = false;
-            font_cfg.RasterizerDensity = dpi_scale;
-            float font_size = 15.0f * dpi_scale;
-
-            ImFont* font_main = nullptr;
-            const char* font_paths[] = {
-                "C:\\Windows\\Fonts\\segoeui.ttf",
-                "C:\\Windows\\Fonts\\calibri.ttf",
-                "C:\\Windows\\Fonts\\arial.ttf",
-            };
-            for (auto* path : font_paths) {
-                font_main = io.Fonts->AddFontFromFileTTF(path, font_size, &font_cfg);
-                if (font_main) {
-                    dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] Font: %s @ %.0fpx (dpi=%.2f)", path, font_size, dpi_scale);
-                    break;
-                }
-            }
-
-            ImFontConfig title_cfg = font_cfg;
-            title_cfg.MergeMode = false;
-            float title_size = 20.0f * dpi_scale;
-
-            ImFont* font_title = nullptr;
-            const char* bold_paths[] = {
-                "C:\\Windows\\Fonts\\seguisb.ttf",
-                "C:\\Windows\\Fonts\\segoeuib.ttf",
-                "C:\\Windows\\Fonts\\arialbd.ttf",
-            };
-            for (auto* path : bold_paths) {
-                font_title = io.Fonts->AddFontFromFileTTF(path, title_size, &title_cfg);
-                if (font_title) {
-                    dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] Title font: %s", path);
-                    break;
-                }
-            }
-
-            imgui_menu::g_font_main  = font_main;
-            imgui_menu::g_font_title = font_title;
-            imgui_menu::g_dpi_scale  = dpi_scale;
-
-            prisme_theme::apply();
-
-            // Init ImGui DX12 backend — use new API to pass CommandQueue
-            // (legacy API doesn't set CommandQueue, causing null crash on font upload)
-            ImGui_ImplDX12_InitInfo init_info;
-            init_info.Device             = g_d3d12_device;
-            // Lock the render queue — ImGui resources (font texture) will be
-            // uploaded on this queue. We MUST use this same queue for all future
-            // rendering, or cross-queue resource access causes DEVICE_HUNG.
-            g_render_queue = g_last_queue ? g_last_queue : g_command_queue;
-            dbg::log_ex(dbg::Level::Warn, dbg::Init,
-                "[DX12] Locked render queue: %p", g_render_queue);
-            init_info.CommandQueue       = g_render_queue;
-            init_info.NumFramesInFlight  = (int)g_buffer_count;
-            init_info.RTVFormat          = g_rtv_format;
-            init_info.SrvDescriptorHeap  = g_srv_heap;
-            init_info.LegacySingleSrvCpuDescriptor = g_srv_heap->GetCPUDescriptorHandleForHeapStart();
-            init_info.LegacySingleSrvGpuDescriptor = g_srv_heap->GetGPUDescriptorHandleForHeapStart();
-            ImGui_ImplDX12_Init(&init_info);
-
-            // Force font texture upload NOW (during init, not lazily on first frame).
-            // This prevents the internal ExecuteCommandLists + fence wait from
-            // happening in the middle of our render_frame, which can conflict
-            // with the game's pipeline.
-            ImGui_ImplDX12_CreateDeviceObjects();
-
-            g_imgui_inited = true;
-            dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] ImGui initialized (fonts uploaded)");
-        }
+        // ImGui init is DEFERRED to first render_frame (when F1 is pressed).
+        // This ensures we lock the render queue at the moment it's actually needed,
+        // not during early warmup when the game might be using a different queue.
 
         g_initialized = true;
-        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] Init complete, waiting for F1");
+        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] DX12 device objects ready, ImGui deferred to first F1");
+        return true;
+    }
+
+    // ── Deferred ImGui init — called on first render_frame ──
+    inline bool init_imgui(IDXGISwapChain* swap) {
+        if (g_imgui_ready) return true;
+
+        DXGI_SWAP_CHAIN_DESC sc_desc;
+        if (FAILED(swap->GetDesc(&sc_desc))) return false;
+
+        // Lock the render queue NOW — at the moment the user presses F1.
+        // This is much more reliable than locking during warmup (frame 100)
+        // because the game is fully loaded and using its actual rendering queue.
+        g_render_queue = g_last_queue ? g_last_queue : g_command_queue;
+        dbg::log_ex(dbg::Level::Warn, dbg::Init,
+            "[DX12] Locked render queue: %p (at first F1)", g_render_queue);
+        if (!g_render_queue) return false;
+
+        ImGui::CreateContext();
+        ImGuiIO& io = ImGui::GetIO();
+        io.ConfigFlags    |= ImGuiConfigFlags_NavEnableKeyboard;
+        io.IniFilename     = nullptr;
+        io.MouseDrawCursor = true;
+
+        // DPI scale
+        float dpi_scale = 1.0f;
+        if (sc_desc.BufferDesc.Height >= 2160) dpi_scale = 1.5f;
+        else if (sc_desc.BufferDesc.Height >= 1440) dpi_scale = 1.25f;
+
+        // Load fonts
+        ImFontConfig font_cfg;
+        font_cfg.OversampleH       = 3;
+        font_cfg.OversampleV       = 2;
+        font_cfg.PixelSnapH        = false;
+        font_cfg.RasterizerDensity = dpi_scale;
+        float font_size = 15.0f * dpi_scale;
+
+        ImFont* font_main = nullptr;
+        const char* font_paths[] = {
+            "C:\\Windows\\Fonts\\segoeui.ttf",
+            "C:\\Windows\\Fonts\\calibri.ttf",
+            "C:\\Windows\\Fonts\\arial.ttf",
+        };
+        for (auto* path : font_paths) {
+            font_main = io.Fonts->AddFontFromFileTTF(path, font_size, &font_cfg);
+            if (font_main) {
+                dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] Font: %s @ %.0fpx (dpi=%.2f)", path, font_size, dpi_scale);
+                break;
+            }
+        }
+
+        ImFontConfig title_cfg = font_cfg;
+        title_cfg.MergeMode = false;
+        float title_size = 20.0f * dpi_scale;
+
+        ImFont* font_title = nullptr;
+        const char* bold_paths[] = {
+            "C:\\Windows\\Fonts\\seguisb.ttf",
+            "C:\\Windows\\Fonts\\segoeuib.ttf",
+            "C:\\Windows\\Fonts\\arialbd.ttf",
+        };
+        for (auto* path : bold_paths) {
+            font_title = io.Fonts->AddFontFromFileTTF(path, title_size, &title_cfg);
+            if (font_title) {
+                dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] Title font: %s", path);
+                break;
+            }
+        }
+
+        imgui_menu::g_font_main  = font_main;
+        imgui_menu::g_font_title = font_title;
+        imgui_menu::g_dpi_scale  = dpi_scale;
+
+        prisme_theme::apply();
+
+        // Init ImGui DX12 backend with the queue we just locked
+        ImGui_ImplDX12_InitInfo init_info;
+        init_info.Device             = g_d3d12_device;
+        init_info.CommandQueue       = g_render_queue;
+        init_info.NumFramesInFlight  = (int)g_buffer_count;
+        init_info.RTVFormat          = g_rtv_format;
+        init_info.SrvDescriptorHeap  = g_srv_heap;
+        init_info.LegacySingleSrvCpuDescriptor = g_srv_heap->GetCPUDescriptorHandleForHeapStart();
+        init_info.LegacySingleSrvGpuDescriptor = g_srv_heap->GetGPUDescriptorHandleForHeapStart();
+        ImGui_ImplDX12_Init(&init_info);
+
+        // Force font texture upload NOW on the locked queue
+        ImGui_ImplDX12_CreateDeviceObjects();
+
+        g_imgui_ready = true;
+        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] ImGui initialized (fonts uploaded)");
         return true;
     }
 
@@ -318,11 +326,20 @@ namespace dx_hook {
     inline int g_render_count = 0;
 
     inline void render_frame(IDXGISwapChain* swap) {
-        if (!g_render_queue) return;
         if (!render::show_menu) {
             g_vmouse_active = false;
             return;
         }
+
+        // Deferred ImGui init — first time menu is shown, lock the queue and init
+        if (!g_imgui_ready) {
+            if (!init_imgui(swap)) {
+                g_init_failed = true;
+                dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] init_imgui FAILED on first F1");
+                return;
+            }
+        }
+        if (!g_render_queue) return;
 
         g_render_count++;
 
@@ -372,17 +389,56 @@ namespace dx_hook {
             return;
         }
 
-        if (g_render_count <= 3) {
+        if (g_render_count <= 5) {
             dbg::log_ex(dbg::Level::Warn, dbg::Init,
                 "[DX12] render_frame #%d, idx=%u, buf=%p, rq=%p",
                 g_render_count, idx, backbuffer, g_render_queue);
         }
 
-        // ── No legacy barriers! ──
-        // UE5 uses D3D12 enhanced barriers (Agility SDK). Legacy ResourceBarrier
-        // transitions (PRESENT→RT) crash the GPU with DEVICE_HUNG 0x887A002B.
-        // The backbuffer is already accessible for rendering without transitions.
+        // ── DIAGNOSTIC: Step-by-step to find what causes DEVICE_HUNG ──
+        // Phase 1 (frames 1-2): Empty command list — tests if the queue works at all
+        // Phase 2 (frames 3-4): ClearRenderTargetView only — tests backbuffer access
+        // Phase 3 (frame 5+):   Full ImGui rendering
 
+        if (g_render_count <= 2) {
+            // Phase 1: Just close and submit empty command list
+            g_cmd_list->Close();
+            ID3D12CommandList* lists[] = { g_cmd_list };
+            g_render_queue->ExecuteCommandLists(1, lists);
+            g_fence_value++;
+            g_fence_values[idx] = g_fence_value;
+            g_render_queue->Signal(g_fence, g_fence_value);
+            backbuffer->Release();
+
+            // Check device health
+            HRESULT dr = g_d3d12_device->GetDeviceRemovedReason();
+            dbg::log_ex(dbg::Level::Warn, dbg::Init,
+                "[DX12] Phase1 frame #%d device=0x%08X (empty cmd list)", g_render_count, (unsigned)dr);
+            if (dr != 0) g_init_failed = true;
+            return;
+        }
+
+        if (g_render_count <= 4) {
+            // Phase 2: ClearRenderTargetView — tests backbuffer rendering
+            g_cmd_list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+            float clear_color[] = { 0.1f, 0.0f, 0.3f, 0.5f }; // subtle purple tint
+            g_cmd_list->ClearRenderTargetView(rtv, clear_color, 0, nullptr);
+            g_cmd_list->Close();
+            ID3D12CommandList* lists[] = { g_cmd_list };
+            g_render_queue->ExecuteCommandLists(1, lists);
+            g_fence_value++;
+            g_fence_values[idx] = g_fence_value;
+            g_render_queue->Signal(g_fence, g_fence_value);
+            backbuffer->Release();
+
+            HRESULT dr = g_d3d12_device->GetDeviceRemovedReason();
+            dbg::log_ex(dbg::Level::Warn, dbg::Init,
+                "[DX12] Phase2 frame #%d device=0x%08X (clear RT)", g_render_count, (unsigned)dr);
+            if (dr != 0) g_init_failed = true;
+            return;
+        }
+
+        // Phase 3: Full ImGui rendering
         g_cmd_list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
 
         ID3D12DescriptorHeap* heaps[] = { g_srv_heap };
@@ -415,10 +471,11 @@ namespace dx_hook {
 
         backbuffer->Release();
 
-        if (g_render_count <= 3) {
+        if (g_render_count <= 6) {
             HRESULT dr = g_d3d12_device->GetDeviceRemovedReason();
             dbg::log_ex(dbg::Level::Warn, dbg::Init,
-                "[DX12] Frame #%d device=0x%08X", g_render_count, (unsigned)dr);
+                "[DX12] Phase3 frame #%d device=0x%08X (full ImGui)", g_render_count, (unsigned)dr);
+            if (dr != 0) g_init_failed = true;
         }
     }
 
