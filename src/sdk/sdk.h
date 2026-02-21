@@ -70,6 +70,49 @@ public:
 
         return FVector(matrix.m[3][0], matrix.m[3][1], matrix.m[3][2]);
     }
+
+    void SetRenderCustomDepth(bool value) {
+        struct { bool bValue; } params = { value };
+        static UObject* func = nullptr;
+        if (!func) func = UObject::StaticFindObject(nullptr, nullptr, L"PrimitiveComponent.SetRenderCustomDepth", false);
+        if (func) ProcessEvent(func, &params);
+    }
+
+    void SetCustomDepthStencilValue(std::int32_t value) {
+        struct { std::int32_t Value; } params = { value };
+        static UObject* func = nullptr;
+        if (!func) func = UObject::StaticFindObject(nullptr, nullptr, L"PrimitiveComponent.SetCustomDepthStencilValue", false);
+        if (func) ProcessEvent(func, &params);
+    }
+
+    void SetVectorParamOnMaterials(FName param_name, FLinearColor value) {
+        struct { FName name; FLinearColor val; } params = { param_name, value };
+        static UObject* func = nullptr;
+        if (!func) func = UObject::StaticFindObject(nullptr, nullptr, L"MeshComponent.SetVectorParameterValueOnMaterials", false);
+        if (func) ProcessEvent(func, &params);
+    }
+
+    void SetScalarParamOnMaterials(FName param_name, float value) {
+        struct { FName name; float val; } params = { param_name, value };
+        static UObject* func = nullptr;
+        if (!func) func = UObject::StaticFindObject(nullptr, nullptr, L"MeshComponent.SetScalarParameterValueOnMaterials", false);
+        if (func) ProcessEvent(func, &params);
+    }
+
+    void SetOverlayMaterial(UObject* material) {
+        struct { UObject* mat; } params = { material };
+        static UObject* func = nullptr;
+        if (!func) func = UObject::StaticFindObject(nullptr, nullptr, L"MeshComponent.SetOverlayMaterial", false);
+        if (func) ProcessEvent(func, &params);
+    }
+
+    UObject* CreateDynamicMaterial(std::int32_t slot = 0) {
+        struct { std::int32_t idx; UObject* src; FName name; UObject* ret; } params = { slot, nullptr, FName(), nullptr };
+        static UObject* func = nullptr;
+        if (!func) func = UObject::StaticFindObject(nullptr, nullptr, L"PrimitiveComponent.CreateDynamicMaterialInstance", false);
+        if (func) ProcessEvent(func, &params);
+        return params.ret;
+    }
 };
 
 

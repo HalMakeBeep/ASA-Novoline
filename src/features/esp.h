@@ -342,7 +342,7 @@ namespace features {
 
             FVector origin;
             FVector extent;
-            character->GetActorBounds(false, &origin, &extent, false);
+            character->GetActorBounds(true, &origin, &extent, false);
 
             FVector aim_location = character->GetActorLocation();
             if (extent.z <= 1.0) {
@@ -363,11 +363,18 @@ namespace features {
         inline bool compute_screen_box(APrimalCharacter* character, APlayerController* controller, ScreenBox* out_box) {
             if (!character || !controller || !out_box) return false;
 
+            // Use onlyColliding=true for stable bounds (collision capsule only).
+            // onlyColliding=false includes all mesh/particle/weapon components,
+            // causing wildly changing box sizes during animations.
             FVector origin;
             FVector extent;
-            character->GetActorBounds(false, &origin, &extent, false);
+            character->GetActorBounds(true, &origin, &extent, false);
 
-            if (extent.x <= 0.0 && extent.y <= 0.0 && extent.z <= 0.0) return false;
+            // Fallback: if collision bounds are empty, use a fixed capsule estimate
+            if (extent.x <= 1.0 && extent.y <= 1.0 && extent.z <= 1.0) {
+                origin = character->GetActorLocation();
+                extent = FVector(40.0, 40.0, 90.0); // reasonable humanoid capsule
+            }
 
             FVector top_world(origin.x, origin.y, origin.z + extent.z);
             FVector bottom_world(origin.x, origin.y, origin.z - extent.z);
@@ -383,11 +390,9 @@ namespace features {
             double center_x = (top_screen.x + bottom_screen.x) * 0.5;
             double center_y = (top_screen.y + bottom_screen.y) * 0.5;
 
-            double horizontal_extent = extent.x > extent.y ? extent.x : extent.y;
-            double vertical_extent = extent.z > 1.0 ? extent.z : 1.0;
-            double horizontal_ratio = horizontal_extent / vertical_extent;
-            horizontal_ratio = clamp_double(horizontal_ratio, 0.20, 1.25);
-            double width = height * horizontal_ratio * 1.20;
+            // Use a fixed aspect ratio for humanoids (width = ~45% of height)
+            // This prevents box width from jumping based on animation pose
+            double width = height * 0.45;
 
             double max_width = render::screen_size.x > 0.0 ? render::screen_size.x * 0.45 : width;
             double max_height = render::screen_size.y > 0.0 ? render::screen_size.y * 0.70 : height;
@@ -531,6 +536,71 @@ namespace features {
                 bar_color);
         }
 
+        // Cached FName indices for material parameter names (resolved once)
+        inline FName g_fname_emissive_color = {};
+        inline FName g_fname_emissive = {};
+        inline FName g_fname_tint_color = {};
+        inline bool g_highlight_names_resolved = false;
+
+        inline void resolve_highlight_names() {
+            if (g_highlight_names_resolved || !sdk::String) return;
+            __try {
+                g_fname_emissive_color = sdk::String->StringToName(L"EmissiveColor");
+                g_fname_emissive = sdk::String->StringToName(L"Emissive");
+                g_fname_tint_color = sdk::String->StringToName(L"TintColor");
+                g_highlight_names_resolved = true;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        }
+
+        inline void apply_highlight(APrimalCharacter* character, FLinearColor color, float intensity) {
+            if (!character) return;
+
+            USkeletalMeshComponent* mesh = nullptr;
+            __try { mesh = character->GetMesh(); } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+            if (!mesh) return;
+
+            if (!g_highlight_names_resolved) resolve_highlight_names();
+
+            // Multiply color by intensity for bright glow effect
+            FLinearColor emissive(color.r * intensity, color.g * intensity, color.b * intensity, 1.0f);
+
+            __try {
+                // Try multiple common parameter names — whichever the material exposes will work
+                mesh->SetVectorParamOnMaterials(g_fname_emissive_color, emissive);
+                mesh->SetVectorParamOnMaterials(g_fname_emissive, emissive);
+                mesh->SetVectorParamOnMaterials(g_fname_tint_color, emissive);
+
+                // Also enable custom depth for potential future post-process outline
+                mesh->SetRenderCustomDepth(true);
+                mesh->SetCustomDepthStencilValue(255);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        }
+
+        inline void clear_highlight(APrimalCharacter* character) {
+            if (!character) return;
+
+            USkeletalMeshComponent* mesh = nullptr;
+            __try { mesh = character->GetMesh(); } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+            if (!mesh) return;
+
+            if (!g_highlight_names_resolved) return;
+
+            FLinearColor zero(0.0f, 0.0f, 0.0f, 1.0f);
+            __try {
+                mesh->SetVectorParamOnMaterials(g_fname_emissive_color, zero);
+                mesh->SetVectorParamOnMaterials(g_fname_emissive, zero);
+                mesh->SetVectorParamOnMaterials(g_fname_tint_color, zero);
+                mesh->SetRenderCustomDepth(false);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        }
+
+        // SEH-safe health getter (can't mix __try with std::wstring in same function)
+        inline float safe_get_health(APrimalCharacter* character) {
+            float h = 0.0f;
+            __try { h = character->GetHealth(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            return h;
+        }
+
         inline bool is_better_target(bool is_player, double distance_to_crosshair, double distance_to_camera) {
             if (!best_target.character) return true;
 
@@ -610,12 +680,33 @@ namespace features {
 
             const auto& players = get_player_actors(world);
 
+            // Get local player name to filter out ghost copies (death caches, replicated duplicates)
+            std::wstring local_player_name;
+            if (local_pawn) {
+                auto* local_shooter = reinterpret_cast<AShooterCharacter*>(local_pawn);
+                if (local_shooter) {
+                    local_player_name = sanitize_display_text(local_shooter->GetPlayerName());
+                }
+            }
+
             for (int i = 0; i < players.size(); i++) {
                 if (!players.valid(i)) { diagnostics::add_player_skipped(); continue; }
 
                 auto* character = (APrimalCharacter*)players[i];
                 if (character == local_pawn || !character) { diagnostics::add_player_skipped(); continue; }
                 if (is_dead_player_actor(character)) { diagnostics::add_player_skipped(); continue; }
+
+                // Filter ghost copies: same player name as local player = death cache / duplicate
+                if (!local_player_name.empty()) {
+                    auto* shooter = reinterpret_cast<AShooterCharacter*>(character);
+                    if (shooter) {
+                        std::wstring other_name = sanitize_display_text(shooter->GetPlayerName());
+                        if (!other_name.empty() && other_name == local_player_name) {
+                            diagnostics::add_player_skipped();
+                            continue;
+                        }
+                    }
+                }
 
                 FVector location = character->GetActorLocation();
                 double distance = sdk::Math->VectorDistance(location, camera_location) * 0.01;
@@ -665,6 +756,10 @@ namespace features {
 
                 if (config::player_esp::show_health && has_box) {
                     draw_health_bar(box, character);
+                }
+
+                if (config::player_esp::highlight) {
+                    apply_highlight(character, color, config::player_esp::highlight_intensity);
                 }
 
                 if (config::player_esp::snapline) {
@@ -738,6 +833,9 @@ namespace features {
                 if (!dino) { diagnostics::add_dino_skipped(); continue; }
                 if (dino->IsDead()) { diagnostics::add_dino_skipped(); continue; }
 
+                // Extra death check: health <= 0 catches dying/ragdoll states IsDead() may miss
+                if (safe_get_health(dino) <= 0.0f) { diagnostics::add_dino_skipped(); continue; }
+
                 FVector location = dino->GetActorLocation();
                 double distance = sdk::Math->VectorDistance(location, camera_location) * 0.01;
                 if (distance > config::dino_esp::max_distance) { diagnostics::add_dino_skipped(); continue; }
@@ -756,25 +854,27 @@ namespace features {
                     screen_pos = aim_screen_pos;
                 }
 
-                // Detect tamed vs wild via team ID (wild = team 0)
+                // Detect tamed vs wild: tamed dinos have a tribe name, wild don't
                 int dino_team = dino->GetTargetingTeam();
-                bool is_wild = (dino_team == 0);
+                std::wstring dino_tribe = sanitize_display_text(dino->GetTribeName());
+                bool is_wild = dino_tribe.empty();
 
                 // Determine if friendly (same team/allied) or enemy tamed
                 bool is_friendly = false;
                 if (!is_wild && local_pawn) {
                     int local_team = local_pawn->GetTargetingTeam();
-                    if (local_team > 0 && dino_team == local_team) {
+                    if (local_team > 0 && dino_team > 0 && dino_team == local_team) {
                         is_friendly = true;
-                    } else if (local_team > 0 && local_pawn->IsAlliedWithOtherTeam(dino_team)) {
+                    } else if (local_team > 0 && dino_team > 0 && local_pawn->IsAlliedWithOtherTeam(dino_team)) {
                         is_friendly = true;
                     }
                 }
 
-                // Filter based on settings
+                // Filter based on settings:
+                // Wild → show_wild, Friendly tamed → show_friendly, Enemy tamed → show_tamed
                 if (is_wild && !config::dino_esp::show_wild) { diagnostics::add_dino_skipped(); continue; }
-                if (!is_wild && !config::dino_esp::show_tamed) { diagnostics::add_dino_skipped(); continue; }
                 if (!is_wild && is_friendly && !config::dino_esp::show_friendly) { diagnostics::add_dino_skipped(); continue; }
+                if (!is_wild && !is_friendly && !config::dino_esp::show_tamed) { diagnostics::add_dino_skipped(); continue; }
 
                 // Pick color based on type
                 FLinearColor color;
@@ -798,6 +898,10 @@ namespace features {
 
                 if (config::dino_esp::box && has_box) {
                     draw_box(box, color, false);
+                }
+
+                if (config::dino_esp::highlight) {
+                    apply_highlight(dino, color, config::dino_esp::highlight_intensity);
                 }
 
                 float text_offset = 0;
@@ -886,10 +990,12 @@ namespace features {
                 }
                 else {
                     // Low-pass filter target motion to remove animation jitter from aim corrections.
-                    double alpha = 0.18;
+                    // At smooth=1: alpha=0.65 (fast tracking), at smooth=10: alpha=0.15 (smooth)
+                    double alpha = 0.5;
                     double smooth_factor = static_cast<double>(config::aimbot::smoothing);
                     if (smooth_factor > 0.0) {
-                        alpha = 1.0 / (smooth_factor + 4.0);
+                        alpha = 1.0 / (smooth_factor * 0.8 + 0.7);
+                        if (alpha > 0.85) alpha = 0.85;
                     }
 
                     smoothed_aim_location.x += (active_target.location.x - smoothed_aim_location.x) * alpha;

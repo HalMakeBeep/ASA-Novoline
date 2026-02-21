@@ -45,6 +45,8 @@ namespace player_esp {
     inline bool cornered_box = false;
     inline bool skeleton = false;
     inline bool snapline = false;
+    inline bool highlight = false;
+    inline float highlight_intensity = 5.0f;
     inline bool show_distance = true;
     inline bool show_name = true;
     inline bool show_tribe = true;
@@ -74,6 +76,8 @@ namespace dino_esp {
     inline bool show_tamed = true;
     inline bool show_friendly = false;
     inline bool box = true;
+    inline bool highlight = false;
+    inline float highlight_intensity = 5.0f;
     inline bool show_distance = true;
     inline bool show_name = true;
     inline bool show_level = true;
@@ -98,6 +102,17 @@ namespace radar {
     inline float pos_x = 50.0f;
     inline float pos_y = 50.0f;
     inline float size = 200.0f;
+}
+
+//=============================================================================
+// Chams Settings (DX12 wallhack)
+//=============================================================================
+namespace chams {
+    inline bool enabled = false;
+    inline bool log_strides = false;  // Debug: log stride values to console
+    inline int target_stride = 0;     // 0 = auto (tries common UE5 strides)
+    inline int min_indices = 1000;    // Min index count to match (skip small meshes)
+    inline int max_indices = 300000;  // Max index count to match (skip huge terrain)
 }
 
 //=============================================================================

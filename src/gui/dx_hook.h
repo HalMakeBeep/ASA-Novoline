@@ -16,6 +16,7 @@
 #include "prisme_theme.h"
 #include "imgui_menu.h"
 #include "../core/console.h"
+#include "../features/chams.h"
 
 namespace dx_hook {
 
@@ -389,56 +390,65 @@ namespace dx_hook {
             return;
         }
 
-        if (g_render_count <= 5) {
+        if (g_render_count <= 3) {
             dbg::log_ex(dbg::Level::Warn, dbg::Init,
                 "[DX12] render_frame #%d, idx=%u, buf=%p, rq=%p",
                 g_render_count, idx, backbuffer, g_render_queue);
         }
 
-        // ── DIAGNOSTIC: Step-by-step to find what causes DEVICE_HUNG ──
-        // Phase 1 (frames 1-2): Empty command list — tests if the queue works at all
-        // Phase 2 (frames 3-4): ClearRenderTargetView only — tests backbuffer access
-        // Phase 3 (frame 5+):   Full ImGui rendering
+        // Only update chams state when hooks are actually active
+        if (features::chams::g_hooks_active) {
+            features::chams::g_our_cmdlist = g_cmd_list;
+            features::chams::dump_stride_stats();
+        }
 
-        if (g_render_count <= 2) {
-            // Phase 1: Just close and submit empty command list
-            g_cmd_list->Close();
-            ID3D12CommandList* lists[] = { g_cmd_list };
-            g_render_queue->ExecuteCommandLists(1, lists);
-            g_fence_value++;
-            g_fence_values[idx] = g_fence_value;
-            g_render_queue->Signal(g_fence, g_fence_value);
-            backbuffer->Release();
-
-            // Check device health
-            HRESULT dr = g_d3d12_device->GetDeviceRemovedReason();
+        // ── DIAGNOSTIC: Test if our queue + allocator work at all ──
+        // First 10 frames: submit EMPTY command list (no rendering).
+        // If this crashes, the issue is the queue itself.
+        // If this works, the issue is in our rendering commands.
+        if (g_render_count <= 10) {
+            hr = g_cmd_list->Close();
             dbg::log_ex(dbg::Level::Warn, dbg::Init,
-                "[DX12] Phase1 frame #%d device=0x%08X (empty cmd list)", g_render_count, (unsigned)dr);
-            if (dr != 0) g_init_failed = true;
+                "[DX12] EMPTY Close() = 0x%08X", (unsigned)hr);
+
+            if (SUCCEEDED(hr)) {
+                ID3D12CommandList* lists[] = { g_cmd_list };
+                g_render_queue->ExecuteCommandLists(1, lists);
+
+                g_fence_value++;
+                g_fence_values[idx] = g_fence_value;
+                g_render_queue->Signal(g_fence, g_fence_value);
+
+                // Check device health after execution
+                HRESULT reason = g_d3d12_device->GetDeviceRemovedReason();
+                dbg::log_ex(dbg::Level::Warn, dbg::Init,
+                    "[DX12] After execute: DeviceRemovedReason = 0x%08X", (unsigned)reason);
+            }
+
+            backbuffer->Release();
             return;
         }
 
-        if (g_render_count <= 4) {
-            // Phase 2: ClearRenderTargetView — tests backbuffer rendering
-            g_cmd_list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-            float clear_color[] = { 0.1f, 0.0f, 0.3f, 0.5f }; // subtle purple tint
-            g_cmd_list->ClearRenderTargetView(rtv, clear_color, 0, nullptr);
-            g_cmd_list->Close();
-            ID3D12CommandList* lists[] = { g_cmd_list };
-            g_render_queue->ExecuteCommandLists(1, lists);
-            g_fence_value++;
-            g_fence_values[idx] = g_fence_value;
-            g_render_queue->Signal(g_fence, g_fence_value);
-            backbuffer->Release();
+        // ── Normal ImGui rendering (only after empty frames succeed) ──
 
-            HRESULT dr = g_d3d12_device->GetDeviceRemovedReason();
-            dbg::log_ex(dbg::Level::Warn, dbg::Init,
-                "[DX12] Phase2 frame #%d device=0x%08X (clear RT)", g_render_count, (unsigned)dr);
-            if (dr != 0) g_init_failed = true;
-            return;
+        // Drain the GPU queue
+        {
+            g_fence_value++;
+            g_render_queue->Signal(g_fence, g_fence_value);
+            if (!wait_for_fence(g_fence_value)) {
+                backbuffer->Release();
+                return;
+            }
         }
 
-        // Phase 3: Full ImGui rendering
+        D3D12_RESOURCE_BARRIER barrier = {};
+        barrier.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource   = backbuffer;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+        barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        g_cmd_list->ResourceBarrier(1, &barrier);
+
         g_cmd_list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
 
         ID3D12DescriptorHeap* heaps[] = { g_srv_heap };
@@ -459,6 +469,10 @@ namespace dx_hook {
         ImGui::Render();
         ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_cmd_list);
 
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_PRESENT;
+        g_cmd_list->ResourceBarrier(1, &barrier);
+
         hr = g_cmd_list->Close();
         if (SUCCEEDED(hr)) {
             ID3D12CommandList* lists[] = { g_cmd_list };
@@ -470,13 +484,6 @@ namespace dx_hook {
         }
 
         backbuffer->Release();
-
-        if (g_render_count <= 6) {
-            HRESULT dr = g_d3d12_device->GetDeviceRemovedReason();
-            dbg::log_ex(dbg::Level::Warn, dbg::Init,
-                "[DX12] Phase3 frame #%d device=0x%08X (full ImGui)", g_render_count, (unsigned)dr);
-            if (dr != 0) g_init_failed = true;
-        }
     }
 
     // ── Present hook ──
@@ -530,7 +537,9 @@ namespace dx_hook {
     }
 
     // ── Get vtable addresses from dummy DX12 device ──
-    inline bool get_hook_addresses(void** present_out, void** execute_out) {
+    inline bool get_hook_addresses(void** present_out, void** execute_out,
+        void** draw_indexed_out = nullptr, void** ia_set_vb_out = nullptr,
+        void** set_pso_out = nullptr, void** create_pso_out = nullptr) {
         dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] Creating dummy device for vtable...");
 
         WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, DefWindowProcW, 0, 0,
@@ -585,6 +594,12 @@ namespace dx_hook {
         dbg::log_ex(dbg::Level::Warn, dbg::Init,
             "[DX12] Present=%p ExecuteCommandLists=%p", *present_out, *execute_out);
 
+        // Extract chams vtable addresses (DrawIndexedInstanced, IASetVertexBuffers, etc.)
+        if (draw_indexed_out && ia_set_vb_out && set_pso_out && create_pso_out) {
+            features::chams::get_vtable_addresses(dev,
+                draw_indexed_out, ia_set_vb_out, set_pso_out, create_pso_out);
+        }
+
         swap_dummy->Release(); factory->Release(); queue->Release(); dev->Release();
         DestroyWindow(hwnd); UnregisterClassW(wc.lpszClassName, wc.hInstance);
         return true;
@@ -602,7 +617,13 @@ namespace dx_hook {
 
         void* present_addr = nullptr;
         void* execute_addr = nullptr;
-        if (!get_hook_addresses(&present_addr, &execute_addr)) {
+        void* draw_indexed_addr = nullptr;
+        void* ia_set_vb_addr = nullptr;
+        void* set_pso_addr = nullptr;
+        void* create_pso_addr = nullptr;
+
+        if (!get_hook_addresses(&present_addr, &execute_addr,
+            &draw_indexed_addr, &ia_set_vb_addr, &set_pso_addr, &create_pso_addr)) {
             dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] Failed to get hook addresses");
             return false;
         }
@@ -615,6 +636,18 @@ namespace dx_hook {
         if (MH_CreateHook(execute_addr, &hkExecuteCommandLists, reinterpret_cast<void**>(&oExecuteCommandLists)) != MH_OK) {
             dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] Hook ExecuteCommandLists failed");
             return false;
+        }
+
+        // Store chams vtable addresses for deferred hook creation.
+        // Chams hooks are NOT created here — only when user activates them from the menu.
+        // This keeps startup clean and avoids MinHook conflicts.
+        if (draw_indexed_addr && ia_set_vb_addr && set_pso_addr && create_pso_addr) {
+            features::chams::g_addr_draw_indexed = draw_indexed_addr;
+            features::chams::g_addr_ia_set_vb    = ia_set_vb_addr;
+            features::chams::g_addr_set_pso      = set_pso_addr;
+            features::chams::g_addr_create_pso   = create_pso_addr;
+            dbg::log_ex(dbg::Level::Warn, dbg::Init,
+                "[DX12] Chams vtable addresses saved (activate from Visuals > Chams)");
         }
 
         MH_EnableHook(MH_ALL_HOOKS);

@@ -26,8 +26,8 @@ namespace features {
             if (!controller->ProjectWorldToScreen(target_location, &target_screen)) return;
             if (!target_screen) return;
 
-            if (smooth < 0.5f) {
-                smooth = 0.5f;
+            if (smooth < 1.0f) {
+                smooth = 1.0f;
             }
 
             const double centerX = width * 0.5;
@@ -36,7 +36,7 @@ namespace features {
             const double error_y = target_screen.y - centerY;
             const double distance_to_center = std::sqrt((error_x * error_x) + (error_y * error_y));
 
-            constexpr double pixel_deadzone = 2.0;
+            constexpr double pixel_deadzone = 1.5;
             if (std::fabs(error_x) < pixel_deadzone && std::fabs(error_y) < pixel_deadzone) {
                 return;
             }
@@ -48,10 +48,11 @@ namespace features {
                 controller_state_valid = true;
             }
 
-            double kp = 1.0 / (static_cast<double>(smooth) * 2.5 + 1.5);
-            double kd = 0.18;
+            // At smooth=1: kp=0.70 (very fast snap), at smooth=10: kp=0.12 (slow track)
+            double kp = 1.0 / (static_cast<double>(smooth) * 1.2 + 0.2);
+            double kd = 0.12;
             if (distance_to_center < 35.0) {
-                kd *= 0.5;
+                kd *= 0.4;
             }
 
             const double d_error_x = error_x - prev_error_x;
@@ -62,7 +63,8 @@ namespace features {
             double move_x = (kp * error_x) + (kd * d_error_x);
             double move_y = (kp * error_y) + (kd * d_error_y);
 
-            constexpr double max_step = 14.0;
+            double max_step = 40.0;
+            if (smooth >= 5.0f) max_step = 20.0;
             if (move_x > max_step) move_x = max_step;
             if (move_x < -max_step) move_x = -max_step;
             if (move_y > max_step) move_y = max_step;

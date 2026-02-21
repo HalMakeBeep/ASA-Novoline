@@ -7,6 +7,7 @@
 #include "../config/profile_manager.h"
 #include "../core/diagnostics.h"
 #include "../core/console.h"
+#include "../features/chams.h"
 #include <cmath>
 
 namespace imgui_menu {
@@ -371,6 +372,7 @@ namespace imgui_menu {
             if (ImGui::BeginTabItem("Players")) { vt = 0; ImGui::EndTabItem(); }
             if (ImGui::BeginTabItem("Dinos"))   { vt = 1; ImGui::EndTabItem(); }
             if (ImGui::BeginTabItem("Radar"))    { vt = 2; ImGui::EndTabItem(); }
+            if (ImGui::BeginTabItem("Chams"))    { vt = 3; ImGui::EndTabItem(); }
             ImGui::EndTabBar();
         }
         ImGui::PopStyleVar();
@@ -382,6 +384,10 @@ namespace imgui_menu {
             toggle_row("Cornered Box", &config::player_esp::cornered_box);
             toggle_row("Skeleton", &config::player_esp::skeleton);
             toggle_row("Health Bar", &config::player_esp::show_health);
+            toggle_row("Highlight Glow", &config::player_esp::highlight);
+            if (config::player_esp::highlight) {
+                slider_row("Glow Intensity", &config::player_esp::highlight_intensity, 1.0f, 20.0f, "%.1f");
+            }
             toggle_row("Snapline", &config::player_esp::snapline);
             toggle_row("Distance", &config::player_esp::show_distance);
             toggle_row("Name", &config::player_esp::show_name);
@@ -403,6 +409,10 @@ namespace imgui_menu {
             toggle_row("Show Enemy Tamed", &config::dino_esp::show_tamed);
             toggle_row("Show Friendly", &config::dino_esp::show_friendly);
             toggle_row("Box", &config::dino_esp::box);
+            toggle_row("Highlight Glow", &config::dino_esp::highlight);
+            if (config::dino_esp::highlight) {
+                slider_row("Glow Intensity", &config::dino_esp::highlight_intensity, 1.0f, 20.0f, "%.1f");
+            }
             toggle_row("Distance", &config::dino_esp::show_distance);
             toggle_row("Name / Type", &config::dino_esp::show_name);
             slider_row("Max Distance", &config::dino_esp::max_distance, 50.f, 1000.f);
@@ -418,6 +428,65 @@ namespace imgui_menu {
                 slider_row("Size", &config::radar::size, 100.f, 400.f);
                 slider_row("Position X", &config::radar::pos_x, 0.f, 1500.f);
                 slider_row("Position Y", &config::radar::pos_y, 0.f, 1000.f);
+            }
+        }
+        else if (vt == 3) {
+            section("DX12 Chams");
+
+            if (!features::chams::g_addr_draw_indexed) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
+                ImGui::TextWrapped("Chams vtable addresses not found. Check log.");
+                ImGui::PopStyleColor();
+            }
+            else if (!features::chams::g_hooks_active) {
+                ImGui::PushStyleColor(ImGuiCol_Text, prisme_theme::text_dim());
+                ImGui::TextWrapped("Hooks are dormant. Enable to start intercepting draw calls and capturing PSOs.");
+                ImGui::PopStyleColor();
+                ImGui::Dummy(ImVec2(0, 4));
+
+                if (toggle_row("Activate Chams Hooks", &config::chams::enabled)) {
+                    if (config::chams::enabled) {
+                        features::chams::enable_hooks();
+                    }
+                }
+            }
+            else {
+                // Hooks are active
+                if (toggle_row("Enable Chams", &config::chams::enabled, "See through walls")) {
+                    if (!config::chams::enabled) {
+                        features::chams::disable_hooks();
+                    }
+                }
+
+                section("Tuning");
+                float stride_f = (float)config::chams::target_stride;
+                if (slider_row("Stride (0=auto)", &stride_f, 0.f, 128.f, "%.0f"))
+                    config::chams::target_stride = (int)stride_f;
+
+                float min_f = (float)config::chams::min_indices;
+                if (slider_row("Min Index Count", &min_f, 0.f, 10000.f, "%.0f"))
+                    config::chams::min_indices = (int)min_f;
+
+                float max_f = (float)config::chams::max_indices;
+                if (slider_row("Max Index Count", &max_f, 10000.f, 500000.f, "%.0f"))
+                    config::chams::max_indices = (int)max_f;
+
+                section("Debug");
+                toggle_row("Log Strides", &config::chams::log_strides, "Log unique strides to console");
+            }
+
+            // Always show status
+            ImGui::Dummy(ImVec2(0, 4));
+            ImGui::PushStyleColor(ImGuiCol_Text, prisme_theme::text_dim());
+            ImGui::Text("Hooks: %s | Chams PSOs: %d",
+                features::chams::g_hooks_active ? "ACTIVE" : "dormant",
+                features::chams::g_chams_pso_count);
+            ImGui::PopStyleColor();
+
+            if (features::chams::g_hooks_active && features::chams::g_chams_pso_count == 0) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.8f, 0.3f, 1.0f));
+                ImGui::TextWrapped("No PSOs captured yet. Change a graphics setting (resolution/quality) to force PSO re-creation.");
+                ImGui::PopStyleColor();
             }
         }
     }
