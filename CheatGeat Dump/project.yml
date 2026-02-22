@@ -1,0 +1,32 @@
+version: 0.1.0
+name: SDKArk
+description: test
+game-name: ARK Survival Ascended
+game-version: '5'
+engine-data:
+  engine-version: 5
+  engine-settings:
+    sdk-generator:
+      max-prop-offset: 4096
+      max-prop-size: 4096
+      max-array-dim: 4096
+      max-element-size: 4096
+      max-enum-items: 4096
+  game-executable: C:\Program Files (x86)\Steam\steamapps\common\ARK Survival Ascended\ShooterGame\Binaries\Win64\ArkAscended.exe
+  suspend-target: true
+  objects-blocks-xor-key: ''
+  names-offsets:
+  - - '0xDD3DC50'
+    - BestOption
+  - - '0xDD3DC50'
+    - Static
+  - - '0x7FFBA6198FD0'
+    - Static
+  names-offset: '0xDD3DC50'
+  objects-offsets:
+  - - '0xD9C2A40'
+    - BestOption
+  - - '0xD9C2A40'
+    - Static
+  objects-offset: '0xD9C2A40'
+logging-level: info
