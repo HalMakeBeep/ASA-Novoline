@@ -18,7 +18,11 @@
       "Bash(cmd.exe //c:*)",
       "Bash(cmd.exe /c build_tmp.bat)",
       "Bash(\"/c/Program Files/CMake/bin/cmake.exe\" --build /c/Users/Yeis/Desktop/PrismeASA/cmake-build-debug --target PrismeASA)",
-      "Bash(cmd.exe /c \"\"\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\Common7\\\\Tools\\\\VsDevCmd.bat\"\" >nul 2>&1 && where cmake\")"
+      "Bash(cmd.exe /c \"\"\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\Common7\\\\Tools\\\\VsDevCmd.bat\"\" >nul 2>&1 && where cmake\")",
+      "Read(//c/Program Files \\(x86\\)/Steam/steamapps/common/ARK Survival Ascended/ShooterGame/Binaries/Win64/**)",
+      "Bash(git -C c:/Users/Yeis/Desktop/PrismeASA show HEAD:.gitignore)",
+      "Bash(git -C c:/Users/Yeis/Desktop/PrismeASA status --short)",
+      "Read(//c/Dumper-7/5.5.4-798291+++ARK1+Rel-1.82-ShooterGame/**)"
     ]
   }
 }

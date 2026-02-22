@@ -23,6 +23,7 @@ add_library(ASA-Internal SHARED
         src/imgui/imgui_tables.cpp
         src/imgui/imgui_widgets.cpp
         src/imgui/backends/imgui_impl_dx11.cpp
+        src/imgui/backends/imgui_impl_dx12.cpp
         src/imgui/backends/imgui_impl_win32.cpp
         external/minhook/src/buffer.c
         external/minhook/src/hook.c
@@ -71,6 +72,28 @@ set_target_properties(ASA-Internal PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
 
+# ============== EMBED TOOL (embed_dll.exe) ==============
+# Encrypts ASA-Internal.dll into embedded_dll.h for the launcher
+
+add_executable(embed_dll tools/embed_dll.cpp)
+if(MSVC)
+    set_property(TARGET embed_dll PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+set_target_properties(embed_dll PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+)
+
+# After DLL is built, run embed_dll to generate embedded_dll.h
+# Using a custom target + BYPRODUCTS so ninja knows the file dependency
+add_custom_target(embed_step
+        COMMAND $<TARGET_FILE:embed_dll>
+                "$<TARGET_FILE:ASA-Internal>"
+                "${CMAKE_SOURCE_DIR}/embedded_dll.h"
+        COMMENT "Encrypting ASA-Internal.dll into embedded_dll.h"
+        BYPRODUCTS "${CMAKE_SOURCE_DIR}/embedded_dll.h"
+        DEPENDS embed_dll ASA-Internal
+)
+
 # ============== LAUNCHER APP (PrismeASA.exe) ==============
 # Subscription system + DLL injector
 
@@ -95,5 +118,6 @@ set_target_properties(PrismeASA PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
 
-# Build DLL before launcher
-add_dependencies(PrismeASA ASA-Internal)
+# Build order: embed_dll.exe + ASA-Internal.dll -> embed_step -> PrismeASA.exe
+add_dependencies(ASA-Internal embed_dll)
+add_dependencies(PrismeASA embed_step)

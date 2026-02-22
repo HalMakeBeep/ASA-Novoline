@@ -342,8 +342,8 @@ namespace ark {
         dbg::enable_category(dbg::Render, false);
         dbg::enable_category(dbg::Aimbot, false);
         dbg::enable_category(dbg::Cache, false);
-        dbg::enable_category(dbg::Hook, false);
-        dbg::enable_category(dbg::SDK, false);
+        dbg::enable_category(dbg::Hook, true);
+        dbg::enable_category(dbg::SDK, true);
         dbg::log_ex(dbg::Level::Info, dbg::Init, "Initialization start");
 
         if (config::profiles::initialize()) {
@@ -422,7 +422,7 @@ namespace ark {
         if (!world) {
             dbg::error("FATAL: Could not find game world after 120 seconds!");
             dbg::error("This likely means the offsets are wrong for this game version.");
-            dbg::error("StaticFindObject offset: 0x%llX", (unsigned long long)offsets::StaticFindObject);
+            dbg::error("GObjects/GNames offsets may be wrong, or game world not loaded yet.");
             init_status::last_error = "World not found after timeout";
             return;
         }

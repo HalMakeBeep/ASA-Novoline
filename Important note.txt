@@ -1,0 +1,112 @@
+https://github.com/nvapi/sigmaker
+
+IDA-Plugin to build signature
+
+https://github.com/Fischsalat/IDAExecFunctionsImporter/tree/master
+
+
+Renderer::MenuFont = UObject::FindObjectSingle<UFont*>(Xors(L"/Game/OldAssets/UI/HUD/Roboto18.Roboto18"));
+
+help to find specific 
+
+static UClass* Metal = nullptr;
+if (!Metal)
+   Metal = UObject::FindObjectSingle<UClass*>(Xors(L"/Game/PrimalEarth/CoreBlueprints/HarvestComponents/MetalHarvestComponent.MetalHarvestComponent_C"));
+
+This fonction help to find any obj component withhin the game returning to 
+
+MaterialInstanceConstant in "C:\Dumper-7\5.5.4-798291+++ARK1+Rel-1.82-ShooterGame\GObjects-Dump.txt"
+for chams best
+
+Xors("Material MM_ASA_Basic.MM_ASA_Basic"), // fully invisible
+
+code for i dont remember what exactly
+```
+
+        static UObject* StaticFindObject(UObject* Class, UObject* Outer, const wchar_t* Name, bool ExactClass)
+        {
+            static void* Address = nullptr;
+
+            if (!Address)
+            {
+                // new?? 48 89 5C 24 ? 48 89 6C 24 ? 48 89 74 24 ? 48 89 7C 24 ? 41 56 48 83 EC ? 80 3D ? ? ? ? 00 41 0F B6 F1
+                // new?? C3 ? ? 48 89 5C 24 ? 55 56 57 41 54 41 55 41 56 41 57 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 84 24 ? ? ? ? 48 83 FA
+                // old?? 40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 68 FC FF FF 48 81 EC 98 04 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 80 03 00 00 48 83
+                // new?? 48 89 5C 24 ? 55 56 57 41 54 41 55 41 56 41 57 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 84 24 ? ? ? ? 48 83 FA
+                Address = (void*)(signature(Xors("48 89 5C 24 ? 55 56 57 41 54 41 55 41 56 41 57 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 84 24 ? ? ? ? 48 83 FA"))).GetPointer();
+            }
+
+            return reinterpret_cast<UObject * (__cdecl*)(UObject*, UObject*, const wchar_t*, bool)>(Address)(Class, Outer, Name, ExactClass);
+        }
+
+        template <class Type>
+        static Type FindObjectSingle(const wchar_t* Name, UObject* Outer = nullptr)
+        {
+            return reinterpret_cast<Type>(UObject::StaticFindObject(nullptr, Outer, Name, false));
+        }
+
+```
+
+
+exemple of caude to refill turret closeby
+
+```
+
+    if (settings::autoMation::AutoFillHeavyTurrets.Enabled && HeavyTurretArray.size() > 0)
+    {
+        static UClass* ARB = nullptr;
+        if (!ARB)
+            ARB = UObject::FindObjectSingle<UClass*>(Xors(L"/Game/PrimalEarth/CoreBlueprints/Weapons/PrimalItemAmmo_AdvancedRifleBullet.PrimalItemAmmo_AdvancedRifleBullet_C"));
+
+        if (globals::local::FrameNum % 3 == 0)
+        {
+            if (HeavyTurretNumber + 1 >= HeavyTurretArray.size())
+                HeavyTurretNumber = -1;
+
+            HeavyTurretNumber++;
+
+            AStructureTurretBaseBP_BaseHeavy_C* HeavyTurret = HeavyTurretArray[HeavyTurretNumber];
+
+            if (!HeavyTurret)
+                return;
+
+            for (int i = 0; i < globals::local::LP->MyInventoryComponent->InventoryItems.Count(); i++)
+            {
+                UPrimalItem* Item = globals::local::LP->MyInventoryComponent->InventoryItems[i];
+
+                if (Item->IsA(ARB))
+                    globals::local::LP->MyInventoryComponent->ServerMergeItemStack(Item->ItemID);
+            }
+
+            if (HeavyTurret->MyInventoryComponent)
+            {
+                globals::local::PC->ServerRequestActorItems(HeavyTurret->MyInventoryComponent, true, false);
+                int numBullets = HeavyTurret->NumBullets;
+                int wantedBullets;
+                int unroundedBullets = 58.f * (float)(settings::autoMation::AutoFillHeavyTurrets.Val);
+                int remainder = unroundedBullets % 100;
+
+                if (remainder > 0)
+                    wantedBullets = unroundedBullets + (100 - remainder);
+                else
+                    wantedBullets = unroundedBullets;
+
+                wantedBullets = min(wantedBullets, 5800);
+                FillTurret(HeavyTurret, Xors("Advanced Rifle Bullet"), wantedBullets);
+            }
+        }
+
+        for (AStructureTurretBaseBP_BaseHeavy_C* HeavyTurret : HeavyTurretArray)
+        {
+            int numBullets = HeavyTurret->NumBullets;
+            int wantedBullets = 58.f * (float)(settings::autoMation::AutoFillHeavyTurrets.Val);
+            if (numBullets < wantedBullets)
+            {
+                FVector2D pos;
+                if (Actors::PWTS(HeavyTurret->K2_GetActorLocation(), pos))
+                    Renderer::DrawString(std::to_wstring(HeavyTurret->NumBullets), pos, { 0.8, 0.8 }, { 1, 0, 0, 1 }, true, { 0, 0, 0, 1 }, true, true);
+            }
+        }
+    }
+
+```

@@ -1,4 +1,5 @@
 #include "Injector/InjectorASA.h"
+#include "embedded_dll.h"
 #include <windows.h>
 #include <winhttp.h>
 #include <wincrypt.h>
@@ -19,6 +20,7 @@
 #define ID_STATUS_LABEL 1003
 #define ID_ANIMATION_TIMER 2001
 #define ID_HOVER_TIMER 2002
+#define ID_INJECT_TIMER 2003
 
 // Firebase Config
 #include "firebase_config.h"
@@ -55,6 +57,9 @@ HBRUSH g_hCardBrush = NULL;
 HBRUSH g_hInputBrush = NULL;
 int g_daysRemaining = 0; // Store subscription days remaining
 int g_hoursRemaining = 0; // Store hours when less than 1 day
+bool g_preloaded = false; // DLL decrypted and ready in memory
+std::vector<BYTE> g_decryptedDll; // Pre-decrypted DLL buffer (ready for instant injection)
+HWND g_hLaunchBtn = NULL; // Launch button handle
 
 // Animation state
 float g_animationPhase = 0.0f;
@@ -91,6 +96,7 @@ bool QueryFirestoreByFinalKey(const std::string& finalKey, LicenseData& outData)
 bool RedeemActivationKey(const std::string& key, const std::string& diskID,
                          const std::string& moboID, const std::string& pcName);
 void FinishStartup();
+void PerformInjection(HWND hwnd, DWORD pid);
 std::string ExtractJsonStringValue(const std::string& json, const std::string& field);
 
 // HTTP Request function
@@ -1129,15 +1135,87 @@ LRESULT CALLBACK LoginWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPa
     return DefWindowProc(hwnd, uMsg, wParam, lParam);
 }
 
+// Create auth token and inject the pre-decrypted DLL into target process
+void PerformInjection(HWND hwnd, DWORD pid) {
+    // Create auth token in shared memory (DLL will verify this)
+    char authName[64];
+    snprintf(authName, sizeof(authName), "Local\\PrismeAuth_%lu", pid);
+
+    BYTE authToken[32];
+    HCRYPTPROV hCryptProv = 0;
+    if (CryptAcquireContext(&hCryptProv, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
+        CryptGenRandom(hCryptProv, 32, authToken);
+        CryptReleaseContext(hCryptProv, 0);
+    } else {
+        srand((unsigned)(GetTickCount64() ^ pid));
+        for (int i = 0; i < 32; i++) authToken[i] = (BYTE)(rand() & 0xFF);
+    }
+
+    HANDLE hMapping = CreateFileMappingA(
+        INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, 32, authName);
+    if (!hMapping) {
+        MessageBoxA(NULL, "Failed to create auth token!", "Error", MB_ICONERROR);
+        return;
+    }
+
+    LPVOID pToken = MapViewOfFile(hMapping, FILE_MAP_WRITE, 0, 0, 32);
+    if (pToken) {
+        memcpy(pToken, authToken, 32);
+        UnmapViewOfFile(pToken);
+    }
+    // Keep hMapping open — DLL needs to read it during init
+
+    // Inject pre-decrypted DLL from memory
+    char errorDetail[512] = {};
+    if (Injector::ManualMapDLL(pid, g_decryptedDll.data(), g_decryptedDll.size(), errorDetail, sizeof(errorDetail))) {
+        SetWindowText(g_hMainStatusLabel, "F1 to open Prisme menu");
+        InvalidateRect(hwnd, NULL, TRUE);
+    } else {
+        CloseHandle(hMapping);
+        char msg[768];
+        snprintf(msg, sizeof(msg), "Failed to inject!\n%s\nTry running as Administrator.", errorDetail);
+        MessageBoxA(NULL, msg, "Error", MB_ICONERROR);
+    }
+}
+
 // Main window procedure
 LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
         case WM_COMMAND: {
-            if (LOWORD(wParam) == 1010) {
-                if (Injector::InjectToASA()) {
-                    SetWindowText(g_hMainStatusLabel, "F1 to open Prisme menu");
-                    InvalidateRect(hwnd, NULL, TRUE);
+            if (LOWORD(wParam) == 1010 && !g_preloaded) {
+                // Preload: decrypt DLL into memory and register F2 hotkey
+                g_decryptedDll.resize(EMBEDDED_DLL_SIZE);
+                for (size_t i = 0; i < EMBEDDED_DLL_SIZE; i++) {
+                    g_decryptedDll[i] = EMBEDDED_DLL_DATA[i] ^ EMBEDDED_DLL_KEY[i % 32];
                 }
+
+                // Register F2 as global hotkey (id = 1)
+                RegisterHotKey(hwnd, 1, 0, VK_F2);
+
+                g_preloaded = true;
+                EnableWindow(g_hLaunchBtn, FALSE);
+                SetWindowText(g_hMainStatusLabel, "Preloaded! Press F2 to inject.");
+            }
+            return 0;
+        }
+
+        case WM_HOTKEY: {
+            if (wParam == 1 && g_preloaded) {
+                DWORD pid = Injector::GetProcessId(L"ArkAscended.exe");
+                if (pid == 0) {
+                    SetWindowText(g_hMainStatusLabel, "ARK not running. Press F2 when in-game.");
+                    return 0;
+                }
+
+                SetWindowText(g_hMainStatusLabel, "Injecting...");
+                PerformInjection(hwnd, pid);
+
+                // Clean up: unregister hotkey, wipe decrypted DLL
+                UnregisterHotKey(hwnd, 1);
+                SecureZeroMemory(g_decryptedDll.data(), g_decryptedDll.size());
+                g_decryptedDll.clear();
+                g_preloaded = false;
+                EnableWindow(g_hLaunchBtn, TRUE);
             }
             return 0;
         }
@@ -1154,6 +1232,11 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             return (LRESULT)g_hBgBrush;
         }
         case WM_DESTROY:
+            UnregisterHotKey(hwnd, 1);
+            if (!g_decryptedDll.empty()) {
+                SecureZeroMemory(g_decryptedDll.data(), g_decryptedDll.size());
+                g_decryptedDll.clear();
+            }
             PostQuitMessage(0);
             return 0;
         case WM_PAINT: {
@@ -1283,13 +1366,13 @@ void ShowMainWindow() {
         ShowWindow(g_hMainWindow, SW_SHOW);
 
         // Add Launch Cheat button
-        HWND hLaunchBtn = CreateWindowEx(
+        g_hLaunchBtn = CreateWindowEx(
             0, "BUTTON", "Launch Prisme",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             160, 320, 200, 45,
             g_hMainWindow, (HMENU)1010, g_hInstance, NULL
         );
-        SendMessage(hLaunchBtn, WM_SETFONT, (WPARAM)g_hButtonFont, TRUE);
+        SendMessage(g_hLaunchBtn, WM_SETFONT, (WPARAM)g_hButtonFont, TRUE);
 
         // Status label below button
         g_hMainStatusLabel = CreateWindow("STATIC", "",

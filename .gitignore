@@ -1,0 +1,27 @@
+# Build output
+cmake-build-*/
+build/
+*.dll
+*.exe
+*.obj
+*.pdb
+*.ilk
+*.lib
+*.exp
+
+# IDE
+.idea/
+.vs/
+*.user
+
+# Visual Studio project files (using CMake now)
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+
+# Generated - contains encrypted DLL binary
+embedded_dll.h
+
+# Secrets
+firebase_config.h

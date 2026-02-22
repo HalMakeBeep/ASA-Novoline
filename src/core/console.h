@@ -4,6 +4,7 @@
 #define NOMINMAX
 #endif
 #include <Windows.h>
+#include <ShlObj.h>
 
 #include <cstdio>
 #include <cstdarg>
@@ -48,7 +49,7 @@ namespace dbg {
     };
 
     inline Level min_level = Level::Info;
-    inline std::uint32_t info_debug_categories = Init | Config | Stability;
+    inline std::uint32_t info_debug_categories = Init | Config | Stability | SDK | Hook;
 
     inline const char* level_str(Level level) {
         switch (level) {
@@ -118,17 +119,21 @@ namespace dbg {
         SMALL_RECT windowSize = { 0, 0, 139, 39 };
         SetConsoleWindowInfo(hConsole, TRUE, &windowSize);
 
-        // Open log file next to the DLL
+        // Open log file on Desktop (easy to find)
         if (!fpLog) {
             char path[MAX_PATH] = {};
-            HMODULE hm = nullptr;
-            GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                               (LPCSTR)&init, &hm);
-            GetModuleFileNameA(hm, path, MAX_PATH);
-            // Replace filename with "prisme_log.txt"
-            char* last_slash = strrchr(path, '\\');
-            if (last_slash) *(last_slash + 1) = '\0';
-            strcat_s(path, "prisme_log.txt");
+            if (SHGetFolderPathA(nullptr, CSIDL_DESKTOPDIRECTORY, nullptr, 0, path) == S_OK) {
+                strcat_s(path, "\\prisme_log.txt");
+            } else {
+                // Fallback: next to DLL
+                HMODULE hm = nullptr;
+                GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   (LPCSTR)&init, &hm);
+                GetModuleFileNameA(hm, path, MAX_PATH);
+                char* last_slash = strrchr(path, '\\');
+                if (last_slash) *(last_slash + 1) = '\0';
+                strcat_s(path, "prisme_log.txt");
+            }
             fpLog = fopen(path, "w");
             if (fpLog) {
                 fprintf(fpLog, "=== Prisme ASA Log Started ===\n");
@@ -206,7 +211,7 @@ namespace dbg {
     inline void log(const char* fmt, ...) {
         va_list args;
         va_start(args, fmt);
-        print_ex(Level::Debug, Category::Init, fmt, args);
+        print_ex(Level::Info, Category::Init, fmt, args);
         va_end(args);
     }
 
@@ -227,14 +232,14 @@ namespace dbg {
     inline void success(const char* fmt, ...) {
         va_list args;
         va_start(args, fmt);
-        print_ex(Level::Debug, Category::Init, fmt, args);
+        print_ex(Level::Info, Category::Init, fmt, args);
         va_end(args);
     }
 
     inline void info(const char* fmt, ...) {
         va_list args;
         va_start(args, fmt);
-        print_ex(Level::Debug, Category::Init, fmt, args);
+        print_ex(Level::Info, Category::Init, fmt, args);
         va_end(args);
     }
 

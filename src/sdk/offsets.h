@@ -6,14 +6,16 @@ extern std::uintptr_t game;
 
 namespace offsets {
 
-    constexpr std::uintptr_t GObjects = 0xDE7FA20;
-    constexpr std::uintptr_t GNames = 0xE1F1340;
-    constexpr std::uintptr_t GWorld = 0xE1B8F98;
+    constexpr std::uintptr_t GObjects = 0x0D9C2A40;
+    constexpr std::uintptr_t GNames = 0x0DD3DC40;
+    constexpr std::uintptr_t GWorld = 0x0DF93210;
 
 
-    constexpr std::uintptr_t ProcessEvent = 0x1919EF0;
-    constexpr std::uintptr_t StaticFindObject = 0x1939440;
-    constexpr std::uintptr_t BoneMatrix = 0x1608A20;
+    constexpr std::uintptr_t ProcessEvent = 0x017D4710;
+
+    // BoneMatrix: used for bone position lookups (ESP bone rendering)
+    // May need updating via IDA if bone ESP crashes
+    inline std::uintptr_t BoneMatrix = 0x1608A20;
 
 
     constexpr int ProcessEventVIdx = 80;
@@ -29,8 +31,8 @@ namespace offsets {
     constexpr std::uintptr_t Character_Mesh = 0x538;
     constexpr std::uintptr_t Character_TargetTeam = 0x1A0;
     constexpr std::uintptr_t Character_TribeName = 0xFC8;
-    constexpr std::uintptr_t ShooterCharacter_PlayerName = 0x1CC0;
-    constexpr std::uintptr_t CameraComponent_FieldOfView = 0x334;
+    constexpr std::uintptr_t ShooterCharacter_PlayerName = 0x1CD0;
+    constexpr std::uintptr_t CameraComponent_FieldOfView = 0x258;
 
 
     constexpr std::uintptr_t Controller_InputYawScale = 0x738;
@@ -51,6 +53,11 @@ namespace offsets {
 
 
     constexpr std::uintptr_t GameInstance_LocalPlayers = 0x38;
+
+
+    // Note: StaticFindObject is no longer needed — we iterate GObjects directly
+    // BoneMatrix is still used for bone position lookups (ESP bone rendering)
+    // Its offset may need updating via IDA if bone ESP crashes
 
 
     inline void validate_offsets(std::uintptr_t module_base) {
@@ -106,7 +113,6 @@ namespace offsets {
         check_func("GNames",           GNames);
         check_func("GWorld",           GWorld);
         check_func("ProcessEvent",     ProcessEvent);
-        check_func("StaticFindObject", StaticFindObject);
         check_func("BoneMatrix",       BoneMatrix);
 
         dbg::info("VTable indices:");

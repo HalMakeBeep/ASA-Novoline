@@ -120,29 +120,17 @@ struct ShellcodeData {
 };
 #pragma pack(pop)
 
-// ─── Manual Map DLL Injection ─────────────────────────────────────
-inline bool ManualMapDLL(DWORD pid, const char* dllPath, char* errorOut = nullptr, size_t errorSize = 0) {
+// ─── Manual Map DLL Injection (from memory buffer) ───────────────
+inline bool ManualMapDLL(DWORD pid, const BYTE* dllBuffer, size_t dllSize, char* errorOut = nullptr, size_t errorSize = 0) {
     auto setError = [&](const char* msg) {
         if (errorOut && errorSize > 0)
             snprintf(errorOut, errorSize, "%s (error %lu)", msg, GetLastError());
     };
 
-    // ── Step 1: Read DLL file into local buffer ──
-    std::ifstream file(dllPath, std::ios::binary | std::ios::ate);
-    if (!file.is_open()) {
-        setError("Failed to open DLL file");
-        return false;
-    }
-    size_t fileSize = (size_t)file.tellg();
-    file.seekg(0, std::ios::beg);
-    std::vector<BYTE> rawDll(fileSize);
-    if (!file.read((char*)rawDll.data(), fileSize)) {
-        setError("Failed to read DLL file");
-        return false;
-    }
-    file.close();
+    // Copy into a local working buffer (we modify it during relocation/import resolution)
+    std::vector<BYTE> rawDll(dllBuffer, dllBuffer + dllSize);
 
-    // ── Step 2: Parse PE headers ──
+    // ── Step 1: Parse PE headers ──
     auto* dosHeader = (IMAGE_DOS_HEADER*)rawDll.data();
     if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE) {
         setError("Invalid DOS signature");
@@ -434,6 +422,30 @@ inline bool ManualMapDLL(DWORD pid, const char* dllPath, char* errorOut = nullpt
     }
 
     return true;
+}
+
+// ─── Manual Map DLL Injection (from file path) ──────────────────
+inline bool ManualMapDLL(DWORD pid, const char* dllPath, char* errorOut = nullptr, size_t errorSize = 0) {
+    auto setError = [&](const char* msg) {
+        if (errorOut && errorSize > 0)
+            snprintf(errorOut, errorSize, "%s (error %lu)", msg, GetLastError());
+    };
+
+    std::ifstream file(dllPath, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) {
+        setError("Failed to open DLL file");
+        return false;
+    }
+    size_t fileSize = (size_t)file.tellg();
+    file.seekg(0, std::ios::beg);
+    std::vector<BYTE> rawDll(fileSize);
+    if (!file.read((char*)rawDll.data(), fileSize)) {
+        setError("Failed to read DLL file");
+        return false;
+    }
+    file.close();
+
+    return ManualMapDLL(pid, rawDll.data(), rawDll.size(), errorOut, errorSize);
 }
 
 // ─── Public API (unchanged interface) ─────────────────────────────

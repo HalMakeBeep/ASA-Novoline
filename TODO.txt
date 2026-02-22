@@ -1,0 +1,68 @@
+=======================================
+  PRISME ASA — TODO / ROADMAP
+=======================================
+
+[URGENT] Update offsets for new ARK build
+  - Game updated, module size changed (242 MB -> 237 MB)
+  - All 6 function offsets need re-dumping: GObjects, GNames, GWorld,
+    ProcessEvent, StaticFindObject, BoneMatrix
+  - Struct offsets may also need checking
+  - Use Dumper-7 or similar UE5 SDK dumper
+
+[HIGH] Signature scanning — replace hardcoded offsets
+  - Scan game memory for byte patterns instead of hardcoded addresses
+  - Survives 90%+ of game updates automatically
+  - ~100-500ms scan at injection time, one-time cost
+  - Affects: offsets.h, sdk.h initialization
+
+[HIGH] DLL protection — prevent unauthorized use — DONE
+  - Option A: Embed encrypted DLL inside launcher EXE
+    * DLL stored as encrypted resource in PrismeASA.exe
+    * Decrypted in memory only after auth key validation
+    * Never written to disk decrypted
+    * If someone extracts ASA-Internal.dll alone, it won't work
+  - Option B: Require auth handshake at DLL init
+    * DLL checks for a shared memory token set by launcher
+    * No token = DLL refuses to initialize
+    * Simpler but DLL file still exists on disk
+  - Option C: VMProtect/Themida on the DLL
+    * Commercial code protection/obfuscation
+    * Makes reverse engineering much harder
+  - Recommendation: A + B combined (encrypted in EXE + runtime auth check)
+
+[HIGH] Preload / early injection system
+  - Launcher starts BEFORE game, waits for ArkAscended.exe to launch
+  - Inject at process creation (suspended process injection)
+    * CreateProcess with CREATE_SUSPENDED flag, or
+    * Hook Steam's game launch to catch the process early
+  - Benefits:
+    * Hook DX12 device/swapchain creation from the start
+    * Capture ALL PSOs for chams (CreateGraphicsPipelineState)
+    * Faster injection, no manual timing needed
+  - Flow: Launch PrismeASA.exe -> authenticate -> click Play ->
+    launcher starts ARK suspended -> inject DLL -> resume process
+
+[MEDIUM] Engine-level chams (UE5 approach, no DX12 hooks needed)
+  - Use ProcessEvent to call on mesh components:
+    * SetRenderCustomDepth(true) — renders through walls
+    * SetCustomDepthStencilValue(N) — identifies highlight group
+    * SetScalarParameterOnMaterials("EmissiveScale", 100) — glow effect
+  - Apply to player/dino mesh components each frame
+  - Works with late injection (no need for early PSO capture)
+  - No DX12 draw call hooks, no barrier issues
+  - Controlled from ImGui menu (Visuals > Chams tab already exists)
+
+[MEDIUM] Test D3D11On12 ImGui rendering
+  - dx_hook.h was rewritten to use D3D11On12 instead of native DX12
+  - Needs testing once offsets are updated and game loads properly
+  - Should fix the GPU crash (DEVICE_HUNG) that native DX12 caused
+
+[LOW] Remove DX12 chams hook code
+  - src/features/chams.h — DX12 DrawIndexedInstanced/PSO approach
+  - Can be removed once engine-level chams are working
+  - Or kept for future use with preload (early injection makes it viable)
+
+[LOW] Clean up remaining dead code — DONE
+  - [x] imgui_impl_dx12.h/.cpp deleted
+  - [x] ZeroGUI compatibility aliases removed from sdk.h
+  - Old VS project files (.sln, .vcxproj) already in .gitignore
