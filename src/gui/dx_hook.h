@@ -1,22 +1,29 @@
 #pragma once
 
 // =============================================================
-// Direct DX12 Hook — renders ImGui natively on the game's DX12 swapchain.
-// Uses our own command allocators + command list. No D3D11On12 layer.
+// DX12 Hook with D3D11On12 ImGui rendering.
+// Hooks Present + ExecuteCommandLists on the game's DX12 swapchain.
+// Uses D3D11On12 wrapper for ImGui rendering — this handles all
+// resource state transitions internally, avoiding UE5.5 barrier conflicts.
 // =============================================================
 
 #include <d3d12.h>
+#include <d3d11on12.h>
 #include <dxgi1_4.h>
 #include <MinHook.h>
 
 #include "imgui.h"
-#include "backends/imgui_impl_dx12.h"
+#include "backends/imgui_impl_dx11.h"
 
 #include "render.h"
 #include "prisme_theme.h"
 #include "imgui_menu.h"
 #include "../core/console.h"
 #include "../features/chams.h"
+
+#pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "d3d12.lib")
+#pragma comment(lib, "dxgi.lib")
 
 namespace dx_hook {
 
@@ -26,33 +33,26 @@ namespace dx_hook {
     inline PresentFn             oPresent             = nullptr;
     inline ExecuteCommandListsFn oExecuteCommandLists = nullptr;
 
-    inline bool g_initialized    = false;  // DX12 device objects created
+    inline bool g_initialized    = false;
     inline bool g_init_failed    = false;
-    inline bool g_imgui_ready    = false;  // ImGui context + backend initialized (deferred to first F1)
-    inline int  g_frame_count  = 0;
-    inline bool g_rendering    = false;
-    inline HWND g_game_hwnd    = nullptr;
-    inline UINT g_buffer_count = 0;
+    inline bool g_imgui_ready    = false;
+    inline int  g_frame_count    = 0;
+    inline bool g_rendering      = false;
+    inline HWND g_game_hwnd      = nullptr;
+    inline UINT g_buffer_count   = 0;
 
     // Game DX12 objects (captured)
     inline ID3D12Device*       g_d3d12_device  = nullptr;
-    inline ID3D12CommandQueue* g_command_queue  = nullptr; // any direct queue (for init gate)
-    inline ID3D12CommandQueue* g_render_queue   = nullptr; // locked queue for ImGui (set once at init)
-    inline ID3D12CommandQueue* g_last_queue     = nullptr; // most recent direct queue (volatile)
+    inline ID3D12CommandQueue* g_command_queue  = nullptr;
+    inline ID3D12CommandQueue* g_render_queue   = nullptr;
+    inline ID3D12CommandQueue* g_last_queue     = nullptr;
 
-    // Our own DX12 rendering objects
-    inline ID3D12DescriptorHeap*      g_rtv_heap   = nullptr;
-    inline ID3D12DescriptorHeap*      g_srv_heap   = nullptr;
-    inline ID3D12CommandAllocator**    g_cmd_allocs = nullptr;
-    inline ID3D12GraphicsCommandList* g_cmd_list   = nullptr;
-
-    // GPU fence for per-frame sync
-    inline ID3D12Fence* g_fence       = nullptr;
-    inline HANDLE       g_fence_event = nullptr;
-    inline UINT64       g_fence_value = 0;
-    inline UINT64*      g_fence_values = nullptr; // per-buffer
-
-    inline DXGI_FORMAT  g_rtv_format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    // D3D11On12 objects
+    inline ID3D11Device*        g_d3d11_device    = nullptr;
+    inline ID3D11DeviceContext*  g_d3d11_context   = nullptr;
+    inline ID3D11On12Device*     g_d3d11on12       = nullptr;
+    inline ID3D11RenderTargetView** g_d3d11_rtvs   = nullptr;
+    inline ID3D11Resource**         g_d3d11_buffers = nullptr;
 
     // ── ExecuteCommandLists hook — tracks the most recent DIRECT queue ──
     inline void WINAPI hkExecuteCommandLists(
@@ -62,7 +62,7 @@ namespace dx_hook {
             D3D12_COMMAND_QUEUE_DESC desc = queue->GetDesc();
             if (desc.Type == D3D12_COMMAND_LIST_TYPE_DIRECT) {
                 if (!g_command_queue) g_command_queue = queue;
-                g_last_queue = queue; // always track latest
+                g_last_queue = queue;
             }
         }
         oExecuteCommandLists(queue, count, lists);
@@ -98,24 +98,21 @@ namespace dx_hook {
             float dx = (float)(raw_cursor.x - g_last_raw_cursor.x);
             float dy = (float)(raw_cursor.y - g_last_raw_cursor.y);
 
-            g_vmouse_x += dx;
-            g_vmouse_y += dy;
+            float sens = 1.0f;
+            g_vmouse_x += dx * sens;
+            g_vmouse_y += dy * sens;
 
-            if (g_vmouse_x < 0.0f) g_vmouse_x = 0.0f;
-            if (g_vmouse_y < 0.0f) g_vmouse_y = 0.0f;
+            if (g_vmouse_x < 0)  g_vmouse_x = 0;
+            if (g_vmouse_y < 0)  g_vmouse_y = 0;
             if (g_vmouse_x > sw) g_vmouse_x = sw;
             if (g_vmouse_y > sh) g_vmouse_y = sh;
 
-            POINT center = { (r.right - r.left) / 2, (r.bottom - r.top) / 2 };
-            ClientToScreen(g_game_hwnd, &center);
-            SetCursorPos(center.x, center.y);
-            g_last_raw_cursor = center;
+            g_last_raw_cursor = raw_cursor;
         }
 
         io.MousePos = ImVec2(g_vmouse_x, g_vmouse_y);
         io.MouseDown[0] = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
         io.MouseDown[1] = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
-        io.MouseDown[2] = (GetAsyncKeyState(VK_MBUTTON) & 0x8000) != 0;
 
         static LARGE_INTEGER freq = {}, last = {};
         if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
@@ -128,21 +125,7 @@ namespace dx_hook {
         if (io.DeltaTime <= 0.0f || io.DeltaTime > 0.05f) io.DeltaTime = 1.0f / 60.0f;
     }
 
-    // ── Wait for a specific fence value (with timeout) ──
-    inline bool wait_for_fence(UINT64 value, DWORD ms = 5000) {
-        if (g_fence->GetCompletedValue() < value) {
-            g_fence->SetEventOnCompletion(value, g_fence_event);
-            DWORD res = WaitForSingleObject(g_fence_event, ms);
-            if (res == WAIT_TIMEOUT) {
-                dbg::log_ex(dbg::Level::Warn, dbg::Init,
-                    "[DX12] Fence wait timeout (%ums) — GPU may be hung", ms);
-                return false;
-            }
-        }
-        return true;
-    }
-
-    // ── Initialize direct DX12 rendering ──
+    // ── Initialize D3D11On12 rendering ──
     inline bool init_dx12(IDXGISwapChain* swap) {
         DXGI_SWAP_CHAIN_DESC sc_desc;
         if (FAILED(swap->GetDesc(&sc_desc))) {
@@ -151,7 +134,6 @@ namespace dx_hook {
         }
         g_game_hwnd    = sc_desc.OutputWindow;
         g_buffer_count = sc_desc.BufferCount;
-        g_rtv_format   = sc_desc.BufferDesc.Format;
 
         if (FAILED(swap->GetDevice(IID_PPV_ARGS(&g_d3d12_device)))) {
             dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] GetDevice failed");
@@ -160,93 +142,94 @@ namespace dx_hook {
 
         dbg::log_ex(dbg::Level::Warn, dbg::Init,
             "[DX12] Device=%p HWND=%p Buffers=%u Format=%u",
-            g_d3d12_device, g_game_hwnd, g_buffer_count, g_rtv_format);
-
-        HRESULT hr;
-
-        // Create RTV descriptor heap (1 slot — we create a fresh RTV each frame)
-        {
-            D3D12_DESCRIPTOR_HEAP_DESC desc = {};
-            desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-            desc.NumDescriptors = 1;
-            desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-            hr = g_d3d12_device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&g_rtv_heap));
-            if (FAILED(hr)) {
-                dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] RTV heap failed: 0x%08X", (unsigned)hr);
-                return false;
-            }
-        }
-
-        // Create SRV descriptor heap (for ImGui font texture)
-        {
-            D3D12_DESCRIPTOR_HEAP_DESC desc = {};
-            desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-            desc.NumDescriptors = 1;
-            desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-            hr = g_d3d12_device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&g_srv_heap));
-            if (FAILED(hr)) {
-                dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] SRV heap failed: 0x%08X", (unsigned)hr);
-                return false;
-            }
-        }
-
-        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] RTV + SRV heaps created");
-
-        // Create command allocators (one per backbuffer for proper GPU sync)
-        g_cmd_allocs = new ID3D12CommandAllocator*[g_buffer_count]();
-        for (UINT i = 0; i < g_buffer_count; i++) {
-            hr = g_d3d12_device->CreateCommandAllocator(
-                D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&g_cmd_allocs[i]));
-            if (FAILED(hr)) {
-                dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] CmdAlloc(%u) failed: 0x%08X", i, (unsigned)hr);
-                return false;
-            }
-        }
-
-        // Create command list (initially closed)
-        hr = g_d3d12_device->CreateCommandList(
-            0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_cmd_allocs[0], nullptr, IID_PPV_ARGS(&g_cmd_list));
-        if (FAILED(hr)) {
-            dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] CmdList failed: 0x%08X", (unsigned)hr);
-            return false;
-        }
-        g_cmd_list->Close(); // start closed — we Reset it each frame
-
-        // Create fence
-        g_fence_values = new UINT64[g_buffer_count]();
-        hr = g_d3d12_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_fence));
-        if (FAILED(hr)) {
-            dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] Fence failed: 0x%08X", (unsigned)hr);
-            return false;
-        }
-        g_fence_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-
-        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] Fence + command objects created");
-
-        // ImGui init is DEFERRED to first render_frame (when F1 is pressed).
-        // This ensures we lock the render queue at the moment it's actually needed,
-        // not during early warmup when the game might be using a different queue.
+            g_d3d12_device, g_game_hwnd, g_buffer_count, sc_desc.BufferDesc.Format);
 
         g_initialized = true;
-        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] DX12 device objects ready, ImGui deferred to first F1");
+        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] DX12 device captured, ImGui deferred to first F1");
         return true;
     }
 
-    // ── Deferred ImGui init — called on first render_frame ──
+    // ── Deferred ImGui init — called on first F1 press ──
     inline bool init_imgui(IDXGISwapChain* swap) {
         if (g_imgui_ready) return true;
 
         DXGI_SWAP_CHAIN_DESC sc_desc;
         if (FAILED(swap->GetDesc(&sc_desc))) return false;
 
-        // Lock the render queue NOW — at the moment the user presses F1.
-        // This is much more reliable than locking during warmup (frame 100)
-        // because the game is fully loaded and using its actual rendering queue.
+        // Lock the render queue at the moment the user presses F1
         g_render_queue = g_last_queue ? g_last_queue : g_command_queue;
         dbg::log_ex(dbg::Level::Warn, dbg::Init,
             "[DX12] Locked render queue: %p (at first F1)", g_render_queue);
         if (!g_render_queue) return false;
 
+        // Create D3D11On12 device wrapping the game's DX12 device
+        IUnknown* queues[] = { g_render_queue };
+        D3D_FEATURE_LEVEL feature_level;
+        HRESULT hr = D3D11On12CreateDevice(
+            g_d3d12_device,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            nullptr, 0,
+            queues, 1,
+            0,
+            &g_d3d11_device, &g_d3d11_context, &feature_level
+        );
+
+        if (FAILED(hr) || !g_d3d11_device) {
+            dbg::log_ex(dbg::Level::Warn, dbg::Init,
+                "[DX12] D3D11On12CreateDevice FAILED: 0x%08X", (unsigned)hr);
+            return false;
+        }
+
+        hr = g_d3d11_device->QueryInterface(IID_PPV_ARGS(&g_d3d11on12));
+        if (FAILED(hr) || !g_d3d11on12) {
+            dbg::log_ex(dbg::Level::Warn, dbg::Init,
+                "[DX12] QueryInterface ID3D11On12Device FAILED: 0x%08X", (unsigned)hr);
+            return false;
+        }
+
+        dbg::log_ex(dbg::Level::Warn, dbg::Init,
+            "[DX12] D3D11On12 device created (feature level 0x%X)", (unsigned)feature_level);
+
+        // Create wrapped resources + RTVs for each backbuffer
+        g_d3d11_buffers = new ID3D11Resource*[g_buffer_count]();
+        g_d3d11_rtvs    = new ID3D11RenderTargetView*[g_buffer_count]();
+
+        for (UINT i = 0; i < g_buffer_count; i++) {
+            ID3D12Resource* backbuffer = nullptr;
+            hr = swap->GetBuffer(i, IID_PPV_ARGS(&backbuffer));
+            if (FAILED(hr) || !backbuffer) {
+                dbg::log_ex(dbg::Level::Warn, dbg::Init,
+                    "[DX12] GetBuffer(%u) failed: 0x%08X", i, (unsigned)hr);
+                return false;
+            }
+
+            D3D11_RESOURCE_FLAGS d3d11_flags = { D3D11_BIND_RENDER_TARGET };
+            hr = g_d3d11on12->CreateWrappedResource(
+                backbuffer, &d3d11_flags,
+                D3D12_RESOURCE_STATE_RENDER_TARGET,
+                D3D12_RESOURCE_STATE_PRESENT,
+                IID_PPV_ARGS(&g_d3d11_buffers[i])
+            );
+            backbuffer->Release();
+
+            if (FAILED(hr) || !g_d3d11_buffers[i]) {
+                dbg::log_ex(dbg::Level::Warn, dbg::Init,
+                    "[DX12] CreateWrappedResource(%u) failed: 0x%08X", i, (unsigned)hr);
+                return false;
+            }
+
+            hr = g_d3d11_device->CreateRenderTargetView(g_d3d11_buffers[i], nullptr, &g_d3d11_rtvs[i]);
+            if (FAILED(hr) || !g_d3d11_rtvs[i]) {
+                dbg::log_ex(dbg::Level::Warn, dbg::Init,
+                    "[DX12] CreateRenderTargetView(%u) failed: 0x%08X", i, (unsigned)hr);
+                return false;
+            }
+        }
+
+        dbg::log_ex(dbg::Level::Warn, dbg::Init,
+            "[DX12] %u wrapped backbuffers + RTVs created", g_buffer_count);
+
+        // Init ImGui
         ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO();
         io.ConfigFlags    |= ImGuiConfigFlags_NavEnableKeyboard;
@@ -304,22 +287,11 @@ namespace dx_hook {
 
         prisme_theme::apply();
 
-        // Init ImGui DX12 backend with the queue we just locked
-        ImGui_ImplDX12_InitInfo init_info;
-        init_info.Device             = g_d3d12_device;
-        init_info.CommandQueue       = g_render_queue;
-        init_info.NumFramesInFlight  = (int)g_buffer_count;
-        init_info.RTVFormat          = g_rtv_format;
-        init_info.SrvDescriptorHeap  = g_srv_heap;
-        init_info.LegacySingleSrvCpuDescriptor = g_srv_heap->GetCPUDescriptorHandleForHeapStart();
-        init_info.LegacySingleSrvGpuDescriptor = g_srv_heap->GetGPUDescriptorHandleForHeapStart();
-        ImGui_ImplDX12_Init(&init_info);
-
-        // Force font texture upload NOW on the locked queue
-        ImGui_ImplDX12_CreateDeviceObjects();
+        // Init ImGui DX11 backend
+        ImGui_ImplDX11_Init(g_d3d11_device, g_d3d11_context);
 
         g_imgui_ready = true;
-        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] ImGui initialized (fonts uploaded)");
+        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] ImGui initialized with D3D11On12");
         return true;
     }
 
@@ -332,7 +304,7 @@ namespace dx_hook {
             return;
         }
 
-        // Deferred ImGui init — first time menu is shown, lock the queue and init
+        // Deferred ImGui init — first time menu is shown
         if (!g_imgui_ready) {
             if (!init_imgui(swap)) {
                 g_init_failed = true;
@@ -340,7 +312,6 @@ namespace dx_hook {
                 return;
             }
         }
-        if (!g_render_queue) return;
 
         g_render_count++;
 
@@ -355,135 +326,32 @@ namespace dx_hook {
         }
         if (idx >= g_buffer_count) idx = 0;
 
-        // Wait for this buffer's previous frame to finish on GPU
-        if (!wait_for_fence(g_fence_values[idx])) {
-            g_init_failed = true;
-            return;
-        }
-
-        // ── Get FRESH backbuffer each frame ──
-        // Previously we cached GetBuffer() during init, but the game calls
-        // ResizeBuffers between init and first F1 press (loading→gameplay),
-        // which invalidates those cached pointers → DEVICE_HUNG crash.
-        ID3D12Resource* backbuffer = nullptr;
-        HRESULT hr = swap->GetBuffer(idx, IID_PPV_ARGS(&backbuffer));
-        if (FAILED(hr) || !backbuffer) {
-            if (g_render_count <= 3)
-                dbg::log_ex(dbg::Level::Warn, dbg::Init,
-                    "[DX12] GetBuffer(%u) failed: 0x%08X", idx, (unsigned)hr);
-            return;
-        }
-
-        // Create fresh RTV descriptor for this backbuffer
-        D3D12_CPU_DESCRIPTOR_HANDLE rtv = g_rtv_heap->GetCPUDescriptorHandleForHeapStart();
-        g_d3d12_device->CreateRenderTargetView(backbuffer, nullptr, rtv);
-
-        // Reset command allocator + list for this frame
-        hr = g_cmd_allocs[idx]->Reset();
-        if (FAILED(hr)) {
-            backbuffer->Release();
-            return;
-        }
-        hr = g_cmd_list->Reset(g_cmd_allocs[idx], nullptr);
-        if (FAILED(hr)) {
-            backbuffer->Release();
-            return;
-        }
-
         if (g_render_count <= 3) {
             dbg::log_ex(dbg::Level::Warn, dbg::Init,
-                "[DX12] render_frame #%d, idx=%u, buf=%p, rq=%p",
-                g_render_count, idx, backbuffer, g_render_queue);
+                "[DX12] render_frame #%d, idx=%u", g_render_count, idx);
         }
 
-        // Only update chams state when hooks are actually active
-        if (features::chams::g_hooks_active) {
-            features::chams::g_our_cmdlist = g_cmd_list;
-            features::chams::dump_stride_stats();
-        }
+        // Acquire the wrapped backbuffer — D3D11On12 handles the state transition
+        g_d3d11on12->AcquireWrappedResources(&g_d3d11_buffers[idx], 1);
 
-        // ── DIAGNOSTIC: Test if our queue + allocator work at all ──
-        // First 10 frames: submit EMPTY command list (no rendering).
-        // If this crashes, the issue is the queue itself.
-        // If this works, the issue is in our rendering commands.
-        if (g_render_count <= 10) {
-            hr = g_cmd_list->Close();
-            dbg::log_ex(dbg::Level::Warn, dbg::Init,
-                "[DX12] EMPTY Close() = 0x%08X", (unsigned)hr);
+        // Set render target
+        g_d3d11_context->OMSetRenderTargets(1, &g_d3d11_rtvs[idx], nullptr);
 
-            if (SUCCEEDED(hr)) {
-                ID3D12CommandList* lists[] = { g_cmd_list };
-                g_render_queue->ExecuteCommandLists(1, lists);
-
-                g_fence_value++;
-                g_fence_values[idx] = g_fence_value;
-                g_render_queue->Signal(g_fence, g_fence_value);
-
-                // Check device health after execution
-                HRESULT reason = g_d3d12_device->GetDeviceRemovedReason();
-                dbg::log_ex(dbg::Level::Warn, dbg::Init,
-                    "[DX12] After execute: DeviceRemovedReason = 0x%08X", (unsigned)reason);
-            }
-
-            backbuffer->Release();
-            return;
-        }
-
-        // ── Normal ImGui rendering (only after empty frames succeed) ──
-
-        // Drain the GPU queue
-        {
-            g_fence_value++;
-            g_render_queue->Signal(g_fence, g_fence_value);
-            if (!wait_for_fence(g_fence_value)) {
-                backbuffer->Release();
-                return;
-            }
-        }
-
-        D3D12_RESOURCE_BARRIER barrier = {};
-        barrier.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition.pResource   = backbuffer;
-        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-        barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        g_cmd_list->ResourceBarrier(1, &barrier);
-
-        g_cmd_list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-
-        ID3D12DescriptorHeap* heaps[] = { g_srv_heap };
-        g_cmd_list->SetDescriptorHeaps(1, heaps);
-
-        D3D12_RESOURCE_DESC rdesc = backbuffer->GetDesc();
-        D3D12_VIEWPORT vp = { 0, 0, (float)rdesc.Width, (float)rdesc.Height, 0, 1.0f };
-        D3D12_RECT     sr = { 0, 0, (LONG)rdesc.Width, (LONG)rdesc.Height };
-        g_cmd_list->RSSetViewports(1, &vp);
-        g_cmd_list->RSSetScissorRects(1, &sr);
-
+        // ImGui rendering
         feed_imgui_input();
         ImGui::GetIO().MouseDrawCursor = true;
 
-        ImGui_ImplDX12_NewFrame();
+        ImGui_ImplDX11_NewFrame();
         ImGui::NewFrame();
         imgui_menu::draw();
         ImGui::Render();
-        ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_cmd_list);
+        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
-        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_PRESENT;
-        g_cmd_list->ResourceBarrier(1, &barrier);
+        // Release the wrapped backbuffer — transitions back to PRESENT state
+        g_d3d11on12->ReleaseWrappedResources(&g_d3d11_buffers[idx], 1);
 
-        hr = g_cmd_list->Close();
-        if (SUCCEEDED(hr)) {
-            ID3D12CommandList* lists[] = { g_cmd_list };
-            g_render_queue->ExecuteCommandLists(1, lists);
-
-            g_fence_value++;
-            g_fence_values[idx] = g_fence_value;
-            g_render_queue->Signal(g_fence, g_fence_value);
-        }
-
-        backbuffer->Release();
+        // Flush D3D11 commands to the GPU
+        g_d3d11_context->Flush();
     }
 
     // ── Present hook ──
@@ -594,7 +462,7 @@ namespace dx_hook {
         dbg::log_ex(dbg::Level::Warn, dbg::Init,
             "[DX12] Present=%p ExecuteCommandLists=%p", *present_out, *execute_out);
 
-        // Extract chams vtable addresses (DrawIndexedInstanced, IASetVertexBuffers, etc.)
+        // Extract chams vtable addresses
         if (draw_indexed_out && ia_set_vb_out && set_pso_out && create_pso_out) {
             features::chams::get_vtable_addresses(dev,
                 draw_indexed_out, ia_set_vb_out, set_pso_out, create_pso_out);
@@ -638,9 +506,7 @@ namespace dx_hook {
             return false;
         }
 
-        // Store chams vtable addresses for deferred hook creation.
-        // Chams hooks are NOT created here — only when user activates them from the menu.
-        // This keeps startup clean and avoids MinHook conflicts.
+        // Store chams vtable addresses for deferred hook creation
         if (draw_indexed_addr && ia_set_vb_addr && set_pso_addr && create_pso_addr) {
             features::chams::g_addr_draw_indexed = draw_indexed_addr;
             features::chams::g_addr_ia_set_vb    = ia_set_vb_addr;

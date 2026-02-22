@@ -23,7 +23,6 @@ add_library(ASA-Internal SHARED
         src/imgui/imgui_tables.cpp
         src/imgui/imgui_widgets.cpp
         src/imgui/backends/imgui_impl_dx11.cpp
-        src/imgui/backends/imgui_impl_dx12.cpp
         src/imgui/backends/imgui_impl_win32.cpp
         external/minhook/src/buffer.c
         external/minhook/src/hook.c

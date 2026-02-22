@@ -9,8 +9,6 @@
 #endif
 #include <Windows.h>
 
-#include "../importer.hpp"
-
 // Debug console (must come before everything else)
 #include "core/console.h"
 #include "core/diagnostics.h"
