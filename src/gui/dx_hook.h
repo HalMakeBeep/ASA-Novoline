@@ -1,18 +1,21 @@
 #pragma once
 
 // =============================================================
-// DX12 Hook with native DX12 ImGui rendering.
-// Hooks Present + ExecuteCommandLists on the game's DX12 swapchain.
-// Uses imgui_impl_dx12 directly — own command allocators, command list,
-// descriptor heap, and fence for synchronization.
+// External Overlay — transparent D3D11 window on top of game.
+// Completely avoids touching the game's DX12 swapchain.
+// Hooks Present only for F1 toggle + game HWND detection.
+// ImGui renders to our own D3D11 device + swapchain.
 // =============================================================
 
+#include <d3d11.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
+#include <dcomp.h>
 #include <MinHook.h>
 
 #include "imgui.h"
-#include "backends/imgui_impl_dx12.h"
+#include "backends/imgui_impl_dx11.h"
+#include "backends/imgui_impl_win32.h"
 
 #include "render.h"
 #include "prisme_theme.h"
@@ -22,6 +25,15 @@
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
+
+// Dynamic imports — manual map injector can't resolve static imports
+using PFN_D3D11_CREATE_DEVICE = HRESULT(WINAPI*)(
+    IDXGIAdapter*, D3D_DRIVER_TYPE, HMODULE, UINT,
+    const D3D_FEATURE_LEVEL*, UINT, UINT,
+    ID3D11Device**, D3D_FEATURE_LEVEL*, ID3D11DeviceContext**);
+
+using PFN_DCOMP_CREATE_DEVICE = HRESULT(WINAPI*)(
+    IDXGIDevice*, REFIID, void**);
 
 namespace dx_hook {
 
@@ -37,23 +49,22 @@ namespace dx_hook {
     inline int  g_frame_count    = 0;
     inline bool g_rendering      = false;
     inline HWND g_game_hwnd      = nullptr;
-    inline UINT g_buffer_count   = 0;
 
-    // Game DX12 objects (captured)
-    inline ID3D12Device*       g_d3d12_device  = nullptr;
+    // Game DX12 objects (captured for chams vtable compatibility)
     inline ID3D12CommandQueue* g_command_queue  = nullptr;
     inline ID3D12CommandQueue* g_last_queue     = nullptr;
 
-    // Our DX12 rendering objects
-    inline ID3D12DescriptorHeap*      g_rtv_heap     = nullptr;
-    inline ID3D12DescriptorHeap*      g_srv_heap     = nullptr;
-    inline ID3D12CommandAllocator**    g_allocators   = nullptr;
-    inline ID3D12GraphicsCommandList*  g_cmd_list     = nullptr;
-    inline ID3D12Resource**            g_backbuffers  = nullptr;
-    inline D3D12_CPU_DESCRIPTOR_HANDLE* g_rtv_handles = nullptr;
-    inline UINT                        g_rtv_increment = 0;
+    // Our overlay window + D3D11 device + DirectComposition
+    inline HWND                    g_overlay_hwnd    = nullptr;
+    inline ID3D11Device*           g_d3d11_device    = nullptr;
+    inline ID3D11DeviceContext*    g_d3d11_context   = nullptr;
+    inline IDXGISwapChain1*        g_d3d11_swap      = nullptr;
+    inline ID3D11RenderTargetView* g_d3d11_rtv       = nullptr;
+    inline IDCompositionDevice*    g_dcomp_device    = nullptr;
+    inline IDCompositionTarget*    g_dcomp_target    = nullptr;
+    inline IDCompositionVisual*    g_dcomp_visual    = nullptr;
 
-    // ── ExecuteCommandLists hook — tracks the most recent DIRECT queue ──
+    // ── ExecuteCommandLists hook — tracks queues for chams compatibility ──
     inline void WINAPI hkExecuteCommandLists(
         ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists)
     {
@@ -72,12 +83,12 @@ namespace dx_hook {
     inline bool  g_vmouse_active = false;
     inline POINT g_last_raw_cursor = {};
 
-    // ── Manual ImGui input with virtual mouse (no WndProc hook) ──
+    // ── Manual ImGui input with virtual mouse ──
     inline void feed_imgui_input() {
         ImGuiIO& io = ImGui::GetIO();
 
         RECT r;
-        if (GetClientRect(g_game_hwnd, &r))
+        if (g_game_hwnd && GetClientRect(g_game_hwnd, &r))
             io.DisplaySize = ImVec2((float)(r.right - r.left), (float)(r.bottom - r.top));
 
         float sw = io.DisplaySize.x;
@@ -97,9 +108,8 @@ namespace dx_hook {
             float dx = (float)(raw_cursor.x - g_last_raw_cursor.x);
             float dy = (float)(raw_cursor.y - g_last_raw_cursor.y);
 
-            float sens = 1.0f;
-            g_vmouse_x += dx * sens;
-            g_vmouse_y += dy * sens;
+            g_vmouse_x += dx;
+            g_vmouse_y += dy;
 
             if (g_vmouse_x < 0)  g_vmouse_x = 0;
             if (g_vmouse_y < 0)  g_vmouse_y = 0;
@@ -124,131 +134,175 @@ namespace dx_hook {
         if (io.DeltaTime <= 0.0f || io.DeltaTime > 0.05f) io.DeltaTime = 1.0f / 60.0f;
     }
 
-    // ── Capture device from swapchain ──
-    inline bool init_dx12(IDXGISwapChain* swap) {
-        DXGI_SWAP_CHAIN_DESC sc_desc;
-        if (FAILED(swap->GetDesc(&sc_desc))) {
-            dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] GetDesc failed");
-            return false;
-        }
-        g_game_hwnd    = sc_desc.OutputWindow;
-        g_buffer_count = sc_desc.BufferCount;
-
-        if (FAILED(swap->GetDevice(IID_PPV_ARGS(&g_d3d12_device)))) {
-            dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] GetDevice failed");
-            return false;
-        }
-
-        dbg::log_ex(dbg::Level::Warn, dbg::Init,
-            "[DX12] Device=%p HWND=%p Buffers=%u Format=%u",
-            g_d3d12_device, g_game_hwnd, g_buffer_count, sc_desc.BufferDesc.Format);
-
-        g_initialized = true;
-        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] DX12 device captured, ImGui deferred to first F1");
-        return true;
+    // ── Overlay window proc ──
+    inline LRESULT CALLBACK overlay_wndproc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        // Block any attempt to close/destroy our overlay
+        if (msg == WM_CLOSE || msg == WM_DESTROY || msg == WM_QUIT)
+            return 0;
+        // Block keyboard messages (we handle input ourselves via GetAsyncKeyState)
+        if (msg == WM_KEYDOWN || msg == WM_KEYUP || msg == WM_SYSKEYDOWN || msg == WM_SYSKEYUP)
+            return 0;
+        return DefWindowProcW(hWnd, msg, wParam, lParam);
     }
 
-    // ── Deferred ImGui init — called on first F1 press ──
-    inline bool init_imgui(IDXGISwapChain* swap) {
+    // ── Position overlay over game window ──
+    inline void sync_overlay_position() {
+        if (!g_game_hwnd || !g_overlay_hwnd) return;
+
+        RECT gr;
+        if (!GetWindowRect(g_game_hwnd, &gr)) return;
+
+        int gw = gr.right - gr.left;
+        int gh = gr.bottom - gr.top;
+
+        // Owned window stays above game automatically.
+        // Just keep position and size in sync.
+        SetWindowPos(g_overlay_hwnd, HWND_TOPMOST,
+            gr.left, gr.top, gw, gh,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
+
+    // ── Create transparent overlay window + D3D11 device + DirectComposition ──
+    inline bool init_overlay() {
         if (g_imgui_ready) return true;
+        if (!g_game_hwnd) return false;
 
-        DXGI_SWAP_CHAIN_DESC sc_desc;
-        if (FAILED(swap->GetDesc(&sc_desc))) {
-            dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] init_imgui: GetDesc failed");
+        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[Overlay] Creating DirectComposition overlay...");
+
+        // Register overlay window class
+        WNDCLASSEXW wc = {};
+        wc.cbSize        = sizeof(wc);
+        wc.style         = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc   = overlay_wndproc;
+        wc.hInstance      = GetModuleHandleW(nullptr);
+        wc.lpszClassName  = L"PrismeOverlay";
+        RegisterClassExW(&wc);
+
+        // Get game window rect
+        RECT gr;
+        GetWindowRect(g_game_hwnd, &gr);
+        int gw = gr.right - gr.left;
+        int gh = gr.bottom - gr.top;
+
+        // Create click-through overlay window (no owner — DirectComposition handles compositing)
+        g_overlay_hwnd = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+            L"PrismeOverlay", L"",
+            WS_POPUP,
+            gr.left, gr.top, gw, gh,
+            nullptr, nullptr, wc.hInstance, nullptr);
+
+        if (!g_overlay_hwnd) {
+            dbg::log_ex(dbg::Level::Error, dbg::Init, "[Overlay] CreateWindowExW failed: %u", GetLastError());
             return false;
         }
 
-        // Pick the game's render queue
-        ID3D12CommandQueue* render_queue = g_last_queue ? g_last_queue : g_command_queue;
-        dbg::log_ex(dbg::Level::Warn, dbg::Init,
-            "[DX12] Using game queue: %p (last=%p first=%p)", render_queue, g_last_queue, g_command_queue);
-        if (!render_queue) {
-            dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] No render queue available!");
+        ShowWindow(g_overlay_hwnd, SW_SHOWNOACTIVATE);
+        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[Overlay] Window created: %dx%d", gw, gh);
+
+        // ── Step 1: Create D3D11 device (no swap chain) ──
+        HMODULE d3d11_mod = LoadLibraryA("d3d11.dll");
+        if (!d3d11_mod) {
+            dbg::log_ex(dbg::Level::Error, dbg::Init, "[Overlay] LoadLibrary(d3d11.dll) failed");
+            return false;
+        }
+        auto pD3D11CreateDevice = (PFN_D3D11_CREATE_DEVICE)
+            GetProcAddress(d3d11_mod, "D3D11CreateDevice");
+        if (!pD3D11CreateDevice) {
+            dbg::log_ex(dbg::Level::Error, dbg::Init, "[Overlay] GetProcAddress(D3D11CreateDevice) failed");
             return false;
         }
 
-        HRESULT hr;
+        D3D_FEATURE_LEVEL featureLevel;
+        HRESULT hr = pD3D11CreateDevice(
+            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            nullptr, 0, D3D11_SDK_VERSION,
+            &g_d3d11_device, &featureLevel, &g_d3d11_context);
 
-        // Create RTV descriptor heap for our backbuffer RTVs
-        {
-            D3D12_DESCRIPTOR_HEAP_DESC desc = {};
-            desc.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-            desc.NumDescriptors = g_buffer_count;
-            desc.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-            hr = g_d3d12_device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&g_rtv_heap));
-            if (FAILED(hr)) {
-                dbg::log_ex(dbg::Level::Error, dbg::Init, "[DX12] CreateDescriptorHeap RTV failed: 0x%08X", (unsigned)hr);
-                return false;
-            }
-        }
-        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] RTV heap created");
-
-        // Create SRV descriptor heap (for ImGui font texture)
-        {
-            D3D12_DESCRIPTOR_HEAP_DESC desc = {};
-            desc.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-            desc.NumDescriptors = 1;
-            desc.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-            hr = g_d3d12_device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&g_srv_heap));
-            if (FAILED(hr)) {
-                dbg::log_ex(dbg::Level::Error, dbg::Init, "[DX12] CreateDescriptorHeap SRV failed: 0x%08X", (unsigned)hr);
-                return false;
-            }
-        }
-        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] SRV heap created");
-
-        // Create command allocators (one per backbuffer)
-        g_allocators = new ID3D12CommandAllocator*[g_buffer_count]();
-        for (UINT i = 0; i < g_buffer_count; i++) {
-            hr = g_d3d12_device->CreateCommandAllocator(
-                D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&g_allocators[i]));
-            if (FAILED(hr)) {
-                dbg::log_ex(dbg::Level::Error, dbg::Init, "[DX12] CreateCommandAllocator(%u) failed: 0x%08X", i, (unsigned)hr);
-                return false;
-            }
-        }
-        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] %u command allocators created", g_buffer_count);
-
-        // Create command list (initially closed)
-        hr = g_d3d12_device->CreateCommandList(
-            0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_allocators[0], nullptr, IID_PPV_ARGS(&g_cmd_list));
         if (FAILED(hr)) {
-            dbg::log_ex(dbg::Level::Error, dbg::Init, "[DX12] CreateCommandList failed: 0x%08X", (unsigned)hr);
+            dbg::log_ex(dbg::Level::Error, dbg::Init, "[Overlay] D3D11CreateDevice failed: 0x%08X", (unsigned)hr);
             return false;
         }
-        g_cmd_list->Close();
-        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] Command list created");
+        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[Overlay] D3D11 device created (feature level: 0x%X)", featureLevel);
 
-        // Get backbuffer resources and create RTVs
-        g_rtv_increment = g_d3d12_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-        g_backbuffers   = new ID3D12Resource*[g_buffer_count]();
-        g_rtv_handles   = new D3D12_CPU_DESCRIPTOR_HANDLE[g_buffer_count]();
+        // ── Step 2: Get DXGI factory from device ──
+        IDXGIDevice* dxgiDevice = nullptr;
+        g_d3d11_device->QueryInterface(IID_PPV_ARGS(&dxgiDevice));
+        IDXGIAdapter* adapter = nullptr;
+        dxgiDevice->GetAdapter(&adapter);
+        IDXGIFactory2* factory2 = nullptr;
+        adapter->GetParent(IID_PPV_ARGS(&factory2));
 
-        D3D12_CPU_DESCRIPTOR_HANDLE rtv_start = g_rtv_heap->GetCPUDescriptorHandleForHeapStart();
-        for (UINT i = 0; i < g_buffer_count; i++) {
-            g_rtv_handles[i].ptr = rtv_start.ptr + (SIZE_T)(i * g_rtv_increment);
+        // ── Step 3: Create swap chain for composition (premultiplied alpha) ──
+        DXGI_SWAP_CHAIN_DESC1 sd = {};
+        sd.Width       = gw;
+        sd.Height      = gh;
+        sd.Format      = DXGI_FORMAT_B8G8R8A8_UNORM;
+        sd.SampleDesc.Count = 1;
+        sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        sd.BufferCount = 2;
+        sd.SwapEffect  = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+        sd.AlphaMode   = DXGI_ALPHA_MODE_PREMULTIPLIED;
 
-            hr = swap->GetBuffer(i, IID_PPV_ARGS(&g_backbuffers[i]));
-            if (FAILED(hr)) {
-                dbg::log_ex(dbg::Level::Error, dbg::Init, "[DX12] GetBuffer(%u) failed: 0x%08X", i, (unsigned)hr);
-                return false;
-            }
-            g_d3d12_device->CreateRenderTargetView(g_backbuffers[i], nullptr, g_rtv_handles[i]);
+        hr = factory2->CreateSwapChainForComposition(g_d3d11_device, &sd, nullptr, &g_d3d11_swap);
+        factory2->Release();
+        adapter->Release();
+
+        if (FAILED(hr)) {
+            dbg::log_ex(dbg::Level::Error, dbg::Init, "[Overlay] CreateSwapChainForComposition failed: 0x%08X", (unsigned)hr);
+            dxgiDevice->Release();
+            return false;
         }
-        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] %u backbuffer RTVs created", g_buffer_count);
+        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[Overlay] Composition swap chain created");
+
+        // ── Step 4: DirectComposition — bind swap chain to window ──
+        HMODULE dcomp_mod = LoadLibraryA("dcomp.dll");
+        if (!dcomp_mod) {
+            dbg::log_ex(dbg::Level::Error, dbg::Init, "[Overlay] LoadLibrary(dcomp.dll) failed");
+            dxgiDevice->Release();
+            return false;
+        }
+        auto pDCompCreate = (PFN_DCOMP_CREATE_DEVICE)
+            GetProcAddress(dcomp_mod, "DCompositionCreateDevice");
+        if (!pDCompCreate) {
+            dbg::log_ex(dbg::Level::Error, dbg::Init, "[Overlay] GetProcAddress(DCompositionCreateDevice) failed");
+            dxgiDevice->Release();
+            return false;
+        }
+
+        hr = pDCompCreate(dxgiDevice, IID_PPV_ARGS(&g_dcomp_device));
+        dxgiDevice->Release();
+        if (FAILED(hr)) {
+            dbg::log_ex(dbg::Level::Error, dbg::Init, "[Overlay] DCompositionCreateDevice failed: 0x%08X", (unsigned)hr);
+            return false;
+        }
+
+        g_dcomp_device->CreateTargetForHwnd(g_overlay_hwnd, TRUE, &g_dcomp_target);
+        g_dcomp_device->CreateVisual(&g_dcomp_visual);
+        g_dcomp_visual->SetContent(g_d3d11_swap);
+        g_dcomp_target->SetRoot(g_dcomp_visual);
+        g_dcomp_device->Commit();
+        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[Overlay] DirectComposition bound");
+
+        // ── Step 5: Create RTV ──
+        ID3D11Texture2D* backbuffer = nullptr;
+        g_d3d11_swap->GetBuffer(0, IID_PPV_ARGS(&backbuffer));
+        g_d3d11_device->CreateRenderTargetView(backbuffer, nullptr, &g_d3d11_rtv);
+        backbuffer->Release();
+        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[Overlay] RTV created");
 
         // Init ImGui
-        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] Creating ImGui context...");
         ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO();
-        io.ConfigFlags    |= ImGuiConfigFlags_NavEnableKeyboard;
-        io.IniFilename     = nullptr;
+        io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;  // No keyboard nav — we use virtual mouse
+        io.IniFilename  = nullptr;
         io.MouseDrawCursor = true;
 
         // DPI scale
         float dpi_scale = 1.0f;
-        if (sc_desc.BufferDesc.Height >= 2160) dpi_scale = 1.5f;
-        else if (sc_desc.BufferDesc.Height >= 1440) dpi_scale = 1.25f;
+        if (gh >= 2160) dpi_scale = 1.5f;
+        else if (gh >= 1440) dpi_scale = 1.25f;
 
         // Load fonts
         ImFontConfig font_cfg;
@@ -267,7 +321,7 @@ namespace dx_hook {
         for (auto* path : font_paths) {
             font_main = io.Fonts->AddFontFromFileTTF(path, font_size, &font_cfg);
             if (font_main) {
-                dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] Font: %s @ %.0fpx (dpi=%.2f)", path, font_size, dpi_scale);
+                dbg::log_ex(dbg::Level::Warn, dbg::Init, "[Overlay] Font: %s @ %.0fpx", path, font_size);
                 break;
             }
         }
@@ -284,10 +338,7 @@ namespace dx_hook {
         };
         for (auto* path : bold_paths) {
             font_title = io.Fonts->AddFontFromFileTTF(path, title_size, &title_cfg);
-            if (font_title) {
-                dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] Title font: %s", path);
-                break;
-            }
+            if (font_title) break;
         }
 
         imgui_menu::g_font_main  = font_main;
@@ -296,108 +347,74 @@ namespace dx_hook {
 
         prisme_theme::apply();
 
-        // Init ImGui DX12 backend
-        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] Calling ImGui_ImplDX12_Init...");
-        ImGui_ImplDX12_InitInfo init_info = {};
-        init_info.Device             = g_d3d12_device;
-        init_info.CommandQueue       = render_queue;
-        init_info.NumFramesInFlight  = (int)g_buffer_count;
-        init_info.RTVFormat          = sc_desc.BufferDesc.Format;
-        init_info.SrvDescriptorHeap  = g_srv_heap;
-
-        // Use legacy single SRV descriptor for font
-        init_info.LegacySingleSrvCpuDescriptor = g_srv_heap->GetCPUDescriptorHandleForHeapStart();
-        init_info.LegacySingleSrvGpuDescriptor = g_srv_heap->GetGPUDescriptorHandleForHeapStart();
-
-        if (!ImGui_ImplDX12_Init(&init_info)) {
-            dbg::log_ex(dbg::Level::Error, dbg::Init, "[DX12] ImGui_ImplDX12_Init FAILED!");
-            return false;
+        // Init ImGui backends (shutdown first if already initialized — prevents assertion)
+        if (ImGui::GetIO().BackendPlatformUserData != nullptr) {
+            ImGui_ImplWin32_Shutdown();
+            ImGui_ImplDX11_Shutdown();
         }
+        ImGui_ImplWin32_Init(g_overlay_hwnd);
+        ImGui_ImplDX11_Init(g_d3d11_device, g_d3d11_context);
 
         g_imgui_ready = true;
-        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] ImGui initialized with native DX12 — READY");
+        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[Overlay] ImGui initialized — READY");
         return true;
     }
 
-    // ── Render one frame ──
+    // ── Render one frame to overlay ──
     inline int g_render_count = 0;
 
-    inline void render_frame(IDXGISwapChain* swap) {
-        if (!render::show_menu) {
-            g_vmouse_active = false;
-            return;
-        }
-
-        // Deferred ImGui init — first time menu is shown
+    inline void render_frame() {
         if (!g_imgui_ready) {
-            if (!init_imgui(swap)) {
+            if (g_init_failed) return;
+            // Only init overlay when menu is first opened
+            if (!render::show_menu) return;
+            if (!init_overlay()) {
                 g_init_failed = true;
-                dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] init_imgui FAILED on first F1");
+                dbg::log_ex(dbg::Level::Error, dbg::Init, "[Overlay] init_overlay failed — won't retry");
                 return;
             }
         }
 
-        g_render_count++;
-
-        // Get current backbuffer index
-        UINT idx = 0;
-        {
-            IDXGISwapChain3* swap3 = nullptr;
-            if (SUCCEEDED(swap->QueryInterface(IID_PPV_ARGS(&swap3)))) {
-                idx = swap3->GetCurrentBackBufferIndex();
-                swap3->Release();
-            }
+        // Pump overlay window messages (required for window to display)
+        MSG msg;
+        while (PeekMessageW(&msg, g_overlay_hwnd, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
         }
-        if (idx >= g_buffer_count) idx = 0;
 
+        // Keep overlay positioned over game (every frame, even when hidden)
+        sync_overlay_position();
+
+        // Clear to fully transparent — DirectComposition makes empty frame invisible
+        float clear_color[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        g_d3d11_context->OMSetRenderTargets(1, &g_d3d11_rtv, nullptr);
+        g_d3d11_context->ClearRenderTargetView(g_d3d11_rtv, clear_color);
+
+        if (render::show_menu) {
+            // Feed input and render ImGui
+            feed_imgui_input();
+
+            ImGui_ImplDX11_NewFrame();
+            ImGui_ImplWin32_NewFrame();
+            ImGui::NewFrame();
+            imgui_menu::draw();
+            ImGui::Render();
+            ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+        } else {
+            g_vmouse_active = false;
+        }
+
+        g_render_count++;
         if (g_render_count <= 3) {
             dbg::log_ex(dbg::Level::Warn, dbg::Init,
-                "[DX12] render_frame #%d, idx=%u/%u", g_render_count, idx, g_buffer_count);
+                "[Overlay] render_frame #%d", g_render_count);
         }
 
-        // Reset command allocator and command list for this frame
-        g_allocators[idx]->Reset();
-        g_cmd_list->Reset(g_allocators[idx], nullptr);
-
-        // Transition backbuffer: PRESENT → RENDER_TARGET
-        D3D12_RESOURCE_BARRIER barrier = {};
-        barrier.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition.pResource   = g_backbuffers[idx];
-        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-        barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        g_cmd_list->ResourceBarrier(1, &barrier);
-
-        // Set render target and SRV heap
-        g_cmd_list->OMSetRenderTargets(1, &g_rtv_handles[idx], FALSE, nullptr);
-        g_cmd_list->SetDescriptorHeaps(1, &g_srv_heap);
-
-        // ImGui rendering
-        feed_imgui_input();
-        ImGui::GetIO().MouseDrawCursor = true;
-
-        ImGui_ImplDX12_NewFrame();
-        ImGui::NewFrame();
-        imgui_menu::draw();
-        ImGui::Render();
-        ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_cmd_list);
-
-        // Transition backbuffer: RENDER_TARGET → PRESENT
-        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_PRESENT;
-        g_cmd_list->ResourceBarrier(1, &barrier);
-
-        // Close and execute
-        g_cmd_list->Close();
-
-        ID3D12CommandQueue* queue = g_last_queue ? g_last_queue : g_command_queue;
-        if (queue) {
-            ID3D12CommandList* lists[] = { g_cmd_list };
-            queue->ExecuteCommandLists(1, lists);
-        }
+        // Always present — transparent clear = invisible when menu closed
+        g_d3d11_swap->Present(0, 0);
     }
 
-    // ── Present hook ──
+    // ── Present hook — only for F1 toggle + game HWND capture ──
     inline HRESULT WINAPI hkPresent(IDXGISwapChain* swap, UINT sync, UINT flags) {
         if (g_rendering) return oPresent(swap, sync, flags);
         g_rendering = true;
@@ -411,9 +428,40 @@ namespace dx_hook {
             return oPresent(swap, sync, flags);
         }
 
-        // F1 toggle
-        if (render::is_vk_clicked(VK_F1)) {
-            render::show_menu = !render::show_menu;
+        // Capture game HWND once
+        if (!g_game_hwnd) {
+            DXGI_SWAP_CHAIN_DESC sc_desc;
+            if (SUCCEEDED(swap->GetDesc(&sc_desc))) {
+                g_game_hwnd = sc_desc.OutputWindow;
+                g_initialized = true;
+                dbg::log_ex(dbg::Level::Warn, dbg::Init,
+                    "[DX12] Game HWND=%p captured", g_game_hwnd);
+            }
+        }
+
+        // F1 toggle — robust state machine with logging
+        {
+            static bool f1_was_down = false;
+            static DWORD last_toggle_time = 0;
+            static int toggle_count = 0;
+
+            bool f1_down = (GetAsyncKeyState(VK_F1) & 0x8000) != 0;
+
+            // Only toggle on key RELEASE (not press) — prevents game interference
+            if (f1_was_down && !f1_down) {
+                DWORD now = GetTickCount();
+                if ((now - last_toggle_time) > 500) {
+                    render::show_menu = !render::show_menu;
+                    last_toggle_time = now;
+                    toggle_count++;
+                    if (toggle_count <= 20) {
+                        dbg::log_ex(dbg::Level::Warn, dbg::Init,
+                            "[F1] Toggle #%d → show_menu=%s (t=%u)",
+                            toggle_count, render::show_menu ? "TRUE" : "FALSE", now);
+                    }
+                }
+            }
+            f1_was_down = f1_down;
         }
 
         if (g_init_failed) {
@@ -422,24 +470,17 @@ namespace dx_hook {
         }
 
         __try {
-            if (!g_initialized && g_command_queue != nullptr) {
-                if (!init_dx12(swap)) {
-                    g_init_failed = true;
-                    dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] init_dx12 FAILED");
-                }
-            }
-
             if (g_initialized) {
-                render_frame(swap);
+                render_frame();
             }
         } __except(EXCEPTION_EXECUTE_HANDLER) {
             static int ex = 0;
             if (++ex <= 5) {
-                dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] Exception #%d in Present", ex);
+                dbg::log_ex(dbg::Level::Warn, dbg::Init, "[Overlay] Exception #%d in render", ex);
             }
             if (ex >= 5) {
                 g_init_failed = true;
-                dbg::log_ex(dbg::Level::Warn, dbg::Init, "[DX12] Too many exceptions — disabling overlay");
+                dbg::log_ex(dbg::Level::Warn, dbg::Init, "[Overlay] Too many exceptions — disabling");
             }
         }
 
@@ -549,14 +590,14 @@ namespace dx_hook {
             return false;
         }
 
-        // Store chams vtable addresses for deferred hook creation
+        // Store chams vtable addresses
         if (draw_indexed_addr && ia_set_vb_addr && set_pso_addr && create_pso_addr) {
             features::chams::g_addr_draw_indexed = draw_indexed_addr;
             features::chams::g_addr_ia_set_vb    = ia_set_vb_addr;
             features::chams::g_addr_set_pso      = set_pso_addr;
             features::chams::g_addr_create_pso   = create_pso_addr;
             dbg::log_ex(dbg::Level::Warn, dbg::Init,
-                "[DX12] Chams vtable addresses saved (activate from Visuals > Chams)");
+                "[DX12] Chams vtable addresses saved");
         }
 
         MH_EnableHook(MH_ALL_HOOKS);

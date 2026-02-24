@@ -2,12 +2,91 @@
   PRISME ASA — TODO / ROADMAP
 =======================================
 
-[URGENT] Update offsets for new ARK build
-  - Game updated, module size changed (242 MB -> 237 MB)
-  - All 6 function offsets need re-dumping: GObjects, GNames, GWorld,
-    ProcessEvent, StaticFindObject, BoneMatrix
-  - Struct offsets may also need checking
-  - Use Dumper-7 or similar UE5 SDK dumper
+Ark Survival Ascended Sigs
+Current: 82.15
+
+-- [ Dumped By Payson ] --
+
+StaticFindObject: 48 89 5C 24 ? 55 56 57 41 54 41 55 41 56 41 57 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 84 24 ? ? ? ? 48 83 FA
+0x17F29C0
+
+BoneMatrix: 48 83 EC ? 65 48 8B 04 25 ? ? ? ? B9 ? ? ? ? ? ? ? ? ? ? 39 05 ? ? ? ? 7F ? 48 8D 05 ? ? ? ? 48 83 C4 ? C3 48 83 C0
+0x14CAA80
+
+ProcessEvent: 40 55 56 57 41 54 41 55 41 56 41 57 48 81 EC ? ? ? ? 48 8D 6C 24 ? 48 89 9D ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C5 48 89 85 ? ? ? ? 4D 8B E0
+0x17D4710
+
+GWorld: 40 53 48 83 EC ? 48 8B 81 ? ? ? ? 48 8B D9 48 85 C0 74 ? 48 8B 98
+0xDD04E08
+
+GNames: 48 89 5C 24 ? 48 89 4C 24 ? 55 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24 ? 48 81 EC ? ? ? ? 44 8B 05
+	~line 879 of the function sigged.
+	unk type. (v189)
+0xDD3DC40
+
+GObjects: 48 83 EC ? 48 8D 0D ? ? ? ? FF 15 ? ? ? ? BA ? ? ? ? 48 8D 0D ? ? ? ? FF 15 ? ? ? ? 33 C0 48 8D 0D ? ? ? ? 48 89 05 ? ? ? ? 48 89 05 ? ? ? ? 48 89 05 ? ? ? ? 48 89 05 ? ? ? ? 48 89 05 ? ? ? ? 48 89 05
+	~line 13 (=1000)
+0xD9C2A40
+
+=======================================
+  ACTIVE BUGS
+=======================================
+
+[BUG] F1 menu doesn't reappear after pressing ESC
+  - Menu overlay falls behind game window or gets destroyed
+  - F1 toggle still works (mouse changes) but GUI not visible
+  - Fixes attempted: WM_CLOSE block, TOPMOST z-order trick, NavEnableKeyboard removal
+  - Status: IN PROGRESS — needs more testing
+
+[BUG] ImGui assertion "Already initialized a platform backend!"
+  - Double call to ImGui_ImplWin32_Init
+  - Fix applied: shutdown-before-init guard
+  - Status: IN PROGRESS — needs testing
+
+[BUG] Chams not producing visible effect
+  - SetOverlayMaterial with EmissiveMeshMaterial: no visible change
+  - New approach: CreateDynamicMaterial + SetVectorParamOnMaterials
+  - Needs testing with new build — log should show "numMats" messages
+  - Status: IN PROGRESS — needs testing
+
+=======================================
+  FEATURES — WORKING
+=======================================
+
+[DONE] DirectComposition overlay (transparent ImGui menu)
+  - D3D11 + DirectComposition for per-pixel alpha
+  - F1 toggle, virtual mouse, sidebar menu
+  - File: src/gui/dx_hook.h
+
+[DONE] ESP (players, dinos, items, structures)
+  - DrawTransition hook, bone ESP, boxes, names, distance
+  - File: src/features/esp.h
+
+[DONE] Aimbot
+  - Bone targeting, smoothing, FOV circle
+  - File: src/features/aimbot.h
+
+[DONE] Radar minimap
+  - File: src/features/radar.h
+
+[DONE] DLL protection — encrypted DLL in launcher + auth token
+  - Embedded encrypted DLL, shared memory auth check
+  - Files: tools/embed_dll.py, launcher.cpp, dllmain.cpp
+
+[DONE] Config save/load (3 profile slots)
+  - File: src/config/settings.h
+
+=======================================
+  TODO — HIGH PRIORITY
+=======================================
+
+[HIGH] Fix GUI stability (ESC bug + assertion)
+  - See active bugs above
+
+[HIGH] Get chams working visually
+  - Current approach: dynamic materials + emissive color
+  - If that fails: try SetMaterial with a proper flat-color material
+  - Fallback: draw colored overlay boxes on the external D3D11 overlay
 
 [HIGH] Signature scanning — replace hardcoded offsets
   - Scan game memory for byte patterns instead of hardcoded addresses
@@ -15,54 +94,28 @@
   - ~100-500ms scan at injection time, one-time cost
   - Affects: offsets.h, sdk.h initialization
 
-[HIGH] DLL protection — prevent unauthorized use — DONE
-  - Option A: Embed encrypted DLL inside launcher EXE
-    * DLL stored as encrypted resource in PrismeASA.exe
-    * Decrypted in memory only after auth key validation
-    * Never written to disk decrypted
-    * If someone extracts ASA-Internal.dll alone, it won't work
-  - Option B: Require auth handshake at DLL init
-    * DLL checks for a shared memory token set by launcher
-    * No token = DLL refuses to initialize
-    * Simpler but DLL file still exists on disk
-  - Option C: VMProtect/Themida on the DLL
-    * Commercial code protection/obfuscation
-    * Makes reverse engineering much harder
-  - Recommendation: A + B combined (encrypted in EXE + runtime auth check)
+=======================================
+  TODO — MEDIUM PRIORITY
+=======================================
 
-[HIGH] Preload / early injection system
-  - Launcher starts BEFORE game, waits for ArkAscended.exe to launch
-  - Inject at process creation (suspended process injection)
-    * CreateProcess with CREATE_SUSPENDED flag, or
-    * Hook Steam's game launch to catch the process early
-  - Benefits:
-    * Hook DX12 device/swapchain creation from the start
-    * Capture ALL PSOs for chams (CreateGraphicsPipelineState)
-    * Faster injection, no manual timing needed
-  - Flow: Launch PrismeASA.exe -> authenticate -> click Play ->
-    launcher starts ARK suspended -> inject DLL -> resume process
+[MEDIUM] Improve GUI design
+  - Copy style from downloaded ImGui reference on desktop
+  - Use Prisme purple/teal colors
+  - Fix mouse boundary issues (mouse gets blocked, have to move menu)
 
-[MEDIUM] Engine-level chams (UE5 approach, no DX12 hooks needed)
-  - Use ProcessEvent to call on mesh components:
-    * SetRenderCustomDepth(true) — renders through walls
-    * SetCustomDepthStencilValue(N) — identifies highlight group
-    * SetScalarParameterOnMaterials("EmissiveScale", 100) — glow effect
-  - Apply to player/dino mesh components each frame
-  - Works with late injection (no need for early PSO capture)
-  - No DX12 draw call hooks, no barrier issues
-  - Controlled from ImGui menu (Visuals > Chams tab already exists)
+[MEDIUM] Preload / early injection system
+  - Launcher starts BEFORE game, waits for ArkAscended.exe
+  - Inject at process creation (suspended process)
+  - Benefits: hook DX12 from start, capture all PSOs for chams
 
-[MEDIUM] Test D3D11On12 ImGui rendering
-  - dx_hook.h was rewritten to use D3D11On12 instead of native DX12
-  - Needs testing once offsets are updated and game loads properly
-  - Should fix the GPU crash (DEVICE_HUNG) that native DX12 caused
+=======================================
+  TODO — LOW PRIORITY
+=======================================
 
-[LOW] Remove DX12 chams hook code
-  - src/features/chams.h — DX12 DrawIndexedInstanced/PSO approach
-  - Can be removed once engine-level chams are working
-  - Or kept for future use with preload (early injection makes it viable)
+[LOW] Remove DX12 chams hook code once engine chams work
+  - src/features/chams.h still has DX12 vtable address extraction
+  - Keep for future preload approach or remove
 
 [LOW] Clean up remaining dead code — DONE
   - [x] imgui_impl_dx12.h/.cpp deleted
   - [x] ZeroGUI compatibility aliases removed from sdk.h
-  - Old VS project files (.sln, .vcxproj) already in .gitignore

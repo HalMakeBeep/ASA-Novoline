@@ -22,7 +22,8 @@
       "Read(//c/Program Files \\(x86\\)/Steam/steamapps/common/ARK Survival Ascended/ShooterGame/Binaries/Win64/**)",
       "Bash(git -C c:/Users/Yeis/Desktop/PrismeASA show HEAD:.gitignore)",
       "Bash(git -C c:/Users/Yeis/Desktop/PrismeASA status --short)",
-      "Read(//c/Dumper-7/5.5.4-798291+++ARK1+Rel-1.82-ShooterGame/**)"
+      "Read(//c/Dumper-7/5.5.4-798291+++ARK1+Rel-1.82-ShooterGame/**)",
+      "Read(//c/Dumper-7/**)"
     ]
   }
 }

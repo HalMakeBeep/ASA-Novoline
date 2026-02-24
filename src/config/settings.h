@@ -105,14 +105,15 @@ namespace radar {
 }
 
 //=============================================================================
-// Chams Settings (DX12 wallhack)
+// Chams Settings (UE5 material-based wallhack)
 //=============================================================================
 namespace chams {
     inline bool enabled = false;
-    inline bool log_strides = false;  // Debug: log stride values to console
-    inline int target_stride = 0;     // 0 = auto (tries common UE5 strides)
-    inline int min_indices = 1000;    // Min index count to match (skip small meshes)
-    inline int max_indices = 300000;  // Max index count to match (skip huge terrain)
+    inline bool players = true;       // Apply chams to players
+    inline bool dinos = true;         // Apply chams to dinos
+    inline float player_color[4] = { 1.0f, 0.0f, 0.0f, 1.0f };   // Red
+    inline float dino_color[4]   = { 0.0f, 1.0f, 0.0f, 1.0f };   // Green
+    inline float intensity = 3.0f;    // Emissive intensity multiplier
 }
 
 //=============================================================================

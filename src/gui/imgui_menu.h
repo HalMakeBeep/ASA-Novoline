@@ -431,63 +431,32 @@ namespace imgui_menu {
             }
         }
         else if (vt == 3) {
-            section("DX12 Chams");
+            section("Material Chams");
 
-            if (!features::chams::g_addr_draw_indexed) {
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
-                ImGui::TextWrapped("Chams vtable addresses not found. Check log.");
-                ImGui::PopStyleColor();
-            }
-            else if (!features::chams::g_hooks_active) {
-                ImGui::PushStyleColor(ImGuiCol_Text, prisme_theme::text_dim());
-                ImGui::TextWrapped("Hooks are dormant. Enable to start intercepting draw calls and capturing PSOs.");
-                ImGui::PopStyleColor();
+            toggle_row("Enable Chams", &config::chams::enabled, "Material-based wallhack");
+
+            if (config::chams::enabled) {
                 ImGui::Dummy(ImVec2(0, 4));
 
-                if (toggle_row("Activate Chams Hooks", &config::chams::enabled)) {
-                    if (config::chams::enabled) {
-                        features::chams::enable_hooks();
-                    }
-                }
-            }
-            else {
-                // Hooks are active
-                if (toggle_row("Enable Chams", &config::chams::enabled, "See through walls")) {
-                    if (!config::chams::enabled) {
-                        features::chams::disable_hooks();
-                    }
-                }
+                section("Targets");
+                toggle_row("Players", &config::chams::players, "Apply chams to players");
+                toggle_row("Dinos", &config::chams::dinos, "Apply chams to dinos");
 
-                section("Tuning");
-                float stride_f = (float)config::chams::target_stride;
-                if (slider_row("Stride (0=auto)", &stride_f, 0.f, 128.f, "%.0f"))
-                    config::chams::target_stride = (int)stride_f;
-
-                float min_f = (float)config::chams::min_indices;
-                if (slider_row("Min Index Count", &min_f, 0.f, 10000.f, "%.0f"))
-                    config::chams::min_indices = (int)min_f;
-
-                float max_f = (float)config::chams::max_indices;
-                if (slider_row("Max Index Count", &max_f, 10000.f, 500000.f, "%.0f"))
-                    config::chams::max_indices = (int)max_f;
-
-                section("Debug");
-                toggle_row("Log Strides", &config::chams::log_strides, "Log unique strides to console");
+                section("Colors");
+                ImGui::ColorEdit4("Player Color", config::chams::player_color, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
+                ImGui::ColorEdit4("Dino Color",   config::chams::dino_color,   ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
+                slider_row("Intensity", &config::chams::intensity, 0.5f, 10.0f, "%.1f");
             }
 
-            // Always show status
+            // Material status
             ImGui::Dummy(ImVec2(0, 4));
             ImGui::PushStyleColor(ImGuiCol_Text, prisme_theme::text_dim());
-            ImGui::Text("Hooks: %s | Chams PSOs: %d",
-                features::chams::g_hooks_active ? "ACTIVE" : "dormant",
-                features::chams::g_chams_pso_count);
+            ImGui::Text("Dynamic meshes: %d", features::chams::g_dynamic_count);
+            if (features::chams::g_names_resolved)
+                ImGui::Text("Parameters: ready");
+            else
+                ImGui::Text("Parameters: pending (enable chams)");
             ImGui::PopStyleColor();
-
-            if (features::chams::g_hooks_active && features::chams::g_chams_pso_count == 0) {
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.8f, 0.3f, 1.0f));
-                ImGui::TextWrapped("No PSOs captured yet. Change a graphics setting (resolution/quality) to force PSO re-creation.");
-                ImGui::PopStyleColor();
-            }
         }
     }
 

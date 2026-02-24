@@ -6,6 +6,7 @@
 #include "../core/diagnostics.h"
 #include "radar.h"
 #include "aimbot.h"
+#include "chams.h"
 #include <cfloat>
 #include <cmath>
 #include <cwctype>
@@ -762,6 +763,11 @@ namespace features {
                     apply_highlight(character, color, config::player_esp::highlight_intensity);
                 }
 
+                // Material-based chams (through walls)
+                if (config::chams::enabled && config::chams::players) {
+                    features::chams::apply_player(character);
+                }
+
                 if (config::player_esp::snapline) {
                     render::line(FVector2D(center.x, render::screen_size.y), screen_pos, color, 1.0f);
                 }
@@ -902,6 +908,11 @@ namespace features {
 
                 if (config::dino_esp::highlight) {
                     apply_highlight(dino, color, config::dino_esp::highlight_intensity);
+                }
+
+                // Material-based chams (through walls)
+                if (config::chams::enabled && config::chams::dinos) {
+                    features::chams::apply_dino(dino);
                 }
 
                 float text_offset = 0;

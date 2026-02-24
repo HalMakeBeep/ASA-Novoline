@@ -249,10 +249,19 @@ public:
         if (FUNC_VALID(func)) ProcessEvent(func, &params);
     }
 
-    void SetVectorParamOnMaterials(FName param_name, FLinearColor value) {
-        struct { FName name; FLinearColor val; } params = { param_name, value };
+    // SetVectorParameterValueOnMaterials — takes FVector (3 floats), NOT FLinearColor
+    void SetVectorParamOnMaterials(FName param_name, FVector value) {
+        struct { FName name; FVector val; } params = { param_name, value };
         static UObject* func = nullptr;
         FIND_FUNC_CACHED(func, L"MeshComponent.SetVectorParameterValueOnMaterials");
+        if (FUNC_VALID(func)) ProcessEvent(func, &params);
+    }
+
+    // SetColorParameterValueOnMaterials — takes FLinearColor (4 floats), correct for colors
+    void SetColorParamOnMaterials(FName param_name, FLinearColor value) {
+        struct { FName name; FLinearColor val; } params = { param_name, value };
+        static UObject* func = nullptr;
+        FIND_FUNC_CACHED(func, L"MeshComponent.SetColorParameterValueOnMaterials");
         if (FUNC_VALID(func)) ProcessEvent(func, &params);
     }
 
@@ -270,6 +279,21 @@ public:
         if (FUNC_VALID(func)) ProcessEvent(func, &params);
     }
 
+    void SetMaterial(std::int32_t element_index, UObject* material) {
+        struct { std::int32_t idx; UObject* mat; } params = { element_index, material };
+        static UObject* func = nullptr;
+        FIND_FUNC_CACHED(func, L"PrimitiveComponent.SetMaterial");
+        if (FUNC_VALID(func)) ProcessEvent(func, &params);
+    }
+
+    std::int32_t GetNumMaterials() {
+        struct { std::int32_t ret; } params = {};
+        static UObject* func = nullptr;
+        FIND_FUNC_CACHED(func, L"PrimitiveComponent.GetNumMaterials");
+        if (FUNC_VALID(func)) ProcessEvent(func, &params);
+        return params.ret;
+    }
+
     UObject* CreateDynamicMaterial(std::int32_t slot = 0) {
         struct { std::int32_t idx; UObject* src; FName name; UObject* ret; } params = { slot, nullptr, FName(), nullptr };
         static UObject* func = nullptr;
@@ -277,8 +301,39 @@ public:
         if (FUNC_VALID(func)) ProcessEvent(func, &params);
         return params.ret;
     }
+
+    // CreateAndSetMaterialInstanceDynamicFromMaterial — one-step SetMaterial + CreateDynamic
+    UObject* CreateAndSetDynamicFromMaterial(std::int32_t slot, UObject* parent_material) {
+        struct { std::int32_t idx; uint8_t pad[4]; UObject* parent; UObject* ret; } params = {};
+        params.idx = slot;
+        params.parent = parent_material;
+        params.ret = nullptr;
+        static UObject* func = nullptr;
+        FIND_FUNC_CACHED(func, L"PrimitiveComponent.CreateAndSetMaterialInstanceDynamicFromMaterial");
+        if (FUNC_VALID(func)) ProcessEvent(func, &params);
+        return params.ret;
+    }
 };
 
+
+// ── Direct MaterialInstanceDynamic parameter functions ──
+// These call SetVectorParameterValue / SetScalarParameterValue directly on a MID object.
+// More reliable than SetVectorParameterValueOnMaterials which goes through the mesh component.
+inline void MID_SetVectorParam(UObject* mid, FName name, FLinearColor value) {
+    if (!mid) return;
+    struct { FName name; FLinearColor val; } params = { name, value };
+    static UObject* func = nullptr;
+    FIND_FUNC_CACHED(func, L"MaterialInstanceDynamic.SetVectorParameterValue");
+    if (FUNC_VALID(func)) mid->ProcessEvent(func, &params);
+}
+
+inline void MID_SetScalarParam(UObject* mid, FName name, float value) {
+    if (!mid) return;
+    struct { FName name; float val; } params = { name, value };
+    static UObject* func = nullptr;
+    FIND_FUNC_CACHED(func, L"MaterialInstanceDynamic.SetScalarParameterValue");
+    if (FUNC_VALID(func)) mid->ProcessEvent(func, &params);
+}
 
 class AActor : public UObject {
 public:

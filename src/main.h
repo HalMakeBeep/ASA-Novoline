@@ -118,6 +118,7 @@ namespace ark {
         }
 
         features::aimbot::draw_fov(center, config::aimbot::fov, camera_fov);
+        features::chams::begin_frame();
         features::esp::reset_target();
         if (diagnostics::feature_enabled(diagnostics::FeaturePath::PlayersEsp)) {
             __try {
@@ -373,6 +374,7 @@ namespace ark {
         init_status::module_found = true;
         dbg::log_ex(dbg::Level::Info, dbg::Init, "Game module resolved at 0x%llX", (unsigned long long)game);
 
+        offsets::resolve_offsets(game);
         offsets::validate_offsets(game);
 
         init_status::current_step = "Initializing SDK";

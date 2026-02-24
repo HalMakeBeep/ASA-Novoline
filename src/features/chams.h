@@ -1,206 +1,45 @@
 #pragma once
 
 /*
- * DX12 Chams — True wallhack via draw call hooking.
+ * UE5 Material-Based Chams
  *
- * Hooks are CREATED at startup but NOT ENABLED until the user turns chams on.
- * This avoids intercepting tens of thousands of draw calls when chams is off.
- *
- * When enabled:
- * - CreateGraphicsPipelineState: creates depth-disabled PSO variants
- * - DrawIndexedInstanced: redraws matching meshes with depth=ALWAYS
- * - IASetVertexBuffers / SetPipelineState: tracks current stride + PSO
+ * Finds EmissiveMeshMaterial from GObjects, creates dynamic instances per-mesh,
+ * sets emissive color, then replaces mesh materials with the colored emissive.
+ * Also enables custom depth stencil for potential through-wall rendering.
  */
 
 #include <d3d12.h>
-#include <MinHook.h>
-#include <unordered_map>
-#include <mutex>
 #include "../config/settings.h"
 #include "../core/console.h"
+#include "../sdk/sdk.h"
 
 namespace features {
 namespace chams {
 
-    // ── Function pointer types for DX12 hooks ──
-    using FnDrawIndexedInstanced = void(STDMETHODCALLTYPE*)(
-        ID3D12GraphicsCommandList*, UINT, UINT, UINT, INT, UINT);
-
-    using FnIASetVertexBuffers = void(STDMETHODCALLTYPE*)(
-        ID3D12GraphicsCommandList*, UINT, UINT, const D3D12_VERTEX_BUFFER_VIEW*);
-
-    using FnSetPipelineState = void(STDMETHODCALLTYPE*)(
-        ID3D12GraphicsCommandList*, ID3D12PipelineState*);
-
-    using FnCreateGfxPSO = HRESULT(STDMETHODCALLTYPE*)(
-        ID3D12Device*, const D3D12_GRAPHICS_PIPELINE_STATE_DESC*, REFIID, void**);
-
-    // ── Original function pointers (filled by MinHook) ──
-    inline FnDrawIndexedInstanced oDrawIndexedInstanced = nullptr;
-    inline FnIASetVertexBuffers   oIASetVertexBuffers   = nullptr;
-    inline FnSetPipelineState     oSetPipelineState     = nullptr;
-    inline FnCreateGfxPSO         oCreateGfxPSO         = nullptr;
-
-    // ── Hook state ──
-    inline bool g_hooks_created = false;  // MH_CreateHook done (but NOT enabled)
-    inline bool g_hooks_active  = false;  // MH_EnableHook done (actively intercepting)
-
-    // Stored addresses for deferred enable/disable
+    // Stored addresses — kept for DX12 hook compatibility (dx_hook references these)
     inline void* g_addr_draw_indexed = nullptr;
     inline void* g_addr_ia_set_vb    = nullptr;
     inline void* g_addr_set_pso      = nullptr;
     inline void* g_addr_create_pso   = nullptr;
 
-    // ── Per-draw state tracking ──
-    inline UINT                  g_stride      = 0;
-    inline ID3D12PipelineState*  g_current_pso = nullptr;
+    // Emissive base material found from GObjects
+    inline UObject* g_emissive_material = nullptr;
+    inline bool     g_mat_init          = false;
+    inline bool     g_mat_ok            = false;
 
-    // Our own command list pointer — skip chams on our ImGui draws
-    inline ID3D12GraphicsCommandList* g_our_cmdlist = nullptr;
+    // Track which meshes we've already applied to (persistent, not per-frame)
+    inline std::uintptr_t g_applied[512] = {};
+    inline int g_applied_count = 0;
 
-    // ── Chams PSO cache: original PSO → depth-disabled variant ──
-    inline std::unordered_map<ID3D12PipelineState*, ID3D12PipelineState*> g_chams_map;
-    inline std::mutex g_mutex;
-    inline int g_chams_pso_count = 0;
+    // For menu display
+    inline int g_dynamic_count = 0;
+    inline bool g_names_resolved = false;
 
-    // ── Stride logging (debug) ──
-    inline std::unordered_map<UINT, int> g_stride_counts;
-    inline int g_frame_counter = 0;
+    // Cached FName for parameter setting
+    inline FName g_fname_emissive = {};
+    inline bool  g_fname_resolved = false;
 
-    // ========================================================================
-    // Hook: IASetVertexBuffers — track the stride of vertex buffer slot 0
-    // ========================================================================
-    inline void STDMETHODCALLTYPE hkIASetVertexBuffers(
-        ID3D12GraphicsCommandList* list, UINT slot, UINT count,
-        const D3D12_VERTEX_BUFFER_VIEW* views)
-    {
-        if (slot == 0 && count > 0 && views)
-            g_stride = views[0].StrideInBytes;
-
-        oIASetVertexBuffers(list, slot, count, views);
-    }
-
-    // ========================================================================
-    // Hook: SetPipelineState — track the currently bound PSO
-    // ========================================================================
-    inline void STDMETHODCALLTYPE hkSetPipelineState(
-        ID3D12GraphicsCommandList* list, ID3D12PipelineState* pso)
-    {
-        g_current_pso = pso;
-        oSetPipelineState(list, pso);
-    }
-
-    // ========================================================================
-    // Hook: DrawIndexedInstanced — the main chams logic
-    // ========================================================================
-    inline void STDMETHODCALLTYPE hkDrawIndexedInstanced(
-        ID3D12GraphicsCommandList* list, UINT idx_count, UINT inst_count,
-        UINT start_idx, INT base_vtx, UINT start_inst)
-    {
-        // Always do the normal draw first
-        oDrawIndexedInstanced(list, idx_count, inst_count, start_idx, base_vtx, start_inst);
-
-        // Skip our own ImGui command list
-        if (list == g_our_cmdlist) return;
-        if (!g_current_pso) return;
-
-        // Stride logging mode — collect stride statistics
-        if (config::chams::log_strides) {
-            g_stride_counts[g_stride]++;
-        }
-
-        if (!config::chams::enabled) return;
-
-        // Stride matching
-        bool match = false;
-        if (config::chams::target_stride > 0) {
-            match = (g_stride == (UINT)config::chams::target_stride);
-        } else {
-            match = (g_stride == 32 || g_stride == 40 || g_stride == 44 || g_stride == 48);
-        }
-        if (!match) return;
-
-        // Index count filter
-        if (idx_count < (UINT)config::chams::min_indices ||
-            idx_count > (UINT)config::chams::max_indices) return;
-
-        // Look up the chams PSO
-        ID3D12PipelineState* chams_pso = nullptr;
-        {
-            std::lock_guard<std::mutex> lk(g_mutex);
-            auto it = g_chams_map.find(g_current_pso);
-            if (it != g_chams_map.end()) chams_pso = it->second;
-        }
-        if (!chams_pso) return;
-
-        // Second draw pass: depth=ALWAYS → visible through walls
-        oSetPipelineState(list, chams_pso);
-        oDrawIndexedInstanced(list, idx_count, inst_count, start_idx, base_vtx, start_inst);
-        oSetPipelineState(list, g_current_pso); // restore
-    }
-
-    // ========================================================================
-    // Hook: CreateGraphicsPipelineState — create depth-disabled PSO variants
-    // ========================================================================
-    inline HRESULT STDMETHODCALLTYPE hkCreateGfxPSO(
-        ID3D12Device* dev, const D3D12_GRAPHICS_PIPELINE_STATE_DESC* desc,
-        REFIID riid, void** out)
-    {
-        // Create the original PSO
-        HRESULT hr = oCreateGfxPSO(dev, desc, riid, out);
-        if (FAILED(hr) || !out || !*out) return hr;
-
-        // Skip PSOs without depth buffer (UI, fullscreen quads, etc.)
-        if (!desc || desc->DSVFormat == DXGI_FORMAT_UNKNOWN) return hr;
-
-        // Create depth-disabled chams variant
-        __try {
-            D3D12_GRAPHICS_PIPELINE_STATE_DESC chams_desc = *desc;
-            chams_desc.DepthStencilState.DepthEnable    = TRUE;
-            chams_desc.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_ALWAYS;
-            chams_desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-
-            ID3D12PipelineState* chams_pso = nullptr;
-            HRESULT hr2 = oCreateGfxPSO(dev, &chams_desc, IID_PPV_ARGS(&chams_pso));
-            if (SUCCEEDED(hr2) && chams_pso) {
-                g_mutex.lock();
-                g_chams_map[static_cast<ID3D12PipelineState*>(*out)] = chams_pso;
-                g_chams_pso_count++;
-                g_mutex.unlock();
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            // Silently skip — some PSO variants may fail
-        }
-
-        return hr;
-    }
-
-    // ========================================================================
-    // Dump stride statistics (called periodically from render_frame)
-    // ========================================================================
-    inline void dump_stride_stats() {
-        if (!g_hooks_active) return;
-        if (!config::chams::log_strides) return;
-
-        g_frame_counter++;
-        if (g_frame_counter % 300 != 0) return;
-
-        dbg::log_ex(dbg::Level::Warn, dbg::Init,
-            "[Chams] Stride stats (chams PSOs: %d):", g_chams_pso_count);
-
-        int shown = 0;
-        for (auto& [stride, count] : g_stride_counts) {
-            if (shown >= 15) break;
-            dbg::log_ex(dbg::Level::Warn, dbg::Init,
-                "  stride=%u  draws=%d", stride, count);
-            shown++;
-        }
-        g_stride_counts.clear();
-    }
-
-    // ========================================================================
-    // Extract vtable addresses from a dummy command list + device
-    // ========================================================================
+    // ── Extract vtable addresses (kept for dx_hook compatibility) ──
     inline bool get_vtable_addresses(ID3D12Device* dev,
         void** out_draw_indexed, void** out_ia_set_vb,
         void** out_set_pso, void** out_create_pso)
@@ -221,10 +60,10 @@ namespace chams {
         void** list_vt = *reinterpret_cast<void***>(list);
         void** dev_vt  = *reinterpret_cast<void***>(dev);
 
-        *out_draw_indexed = list_vt[13];  // DrawIndexedInstanced
-        *out_ia_set_vb    = list_vt[44];  // IASetVertexBuffers
-        *out_set_pso      = list_vt[25];  // SetPipelineState
-        *out_create_pso   = dev_vt[10];   // CreateGraphicsPipelineState
+        *out_draw_indexed = list_vt[13];
+        *out_ia_set_vb    = list_vt[44];
+        *out_set_pso      = list_vt[25];
+        *out_create_pso   = dev_vt[10];
 
         dbg::log_ex(dbg::Level::Warn, dbg::Init,
             "[Chams] Vtable: DrawIndexed=%p IASetVB=%p SetPSO=%p CreatePSO=%p",
@@ -235,88 +74,214 @@ namespace chams {
         return true;
     }
 
-    // ========================================================================
-    // Create + enable chams hooks on demand (called from menu toggle)
-    // Hooks are NOT created at startup — only when user activates chams.
-    // ========================================================================
-    inline bool enable_hooks() {
-        if (g_hooks_active) return true;
+    // ── Find emissive base material from GObjects ──
+    inline void init_material() {
+        if (g_mat_init) return;
+        g_mat_init = true;
 
-        // Need vtable addresses
-        if (!g_addr_draw_indexed || !g_addr_ia_set_vb ||
-            !g_addr_set_pso || !g_addr_create_pso) {
-            dbg::log_ex(dbg::Level::Warn, dbg::Init, "[Chams] No vtable addresses — cannot create hooks");
-            return false;
+        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[Chams] Searching for emissive material...");
+
+        // MaterialInstanceConstant entries from GObjects dump
+        const wchar_t* candidates[] = {
+            L"Glow_Trans_Lit",
+            L"Widget3DPassThrough_Opaque",
+            L"GlowRing_MIC",
+            L"EmissiveMeshMaterial",
+        };
+
+        for (auto* name : candidates) {
+            __try {
+                g_emissive_material = UObject::FindObject(name, nullptr);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                g_emissive_material = nullptr;
+            }
+
+            if (g_emissive_material) {
+                dbg::log_ex(dbg::Level::Warn, dbg::Init,
+                    "[Chams] Found '%ls' at %p", name, g_emissive_material);
+                g_mat_ok = true;
+                return;
+            }
         }
 
-        // Create hooks if not yet created
-        if (!g_hooks_created) {
-            bool ok = true;
-            if (MH_CreateHook(g_addr_draw_indexed, &hkDrawIndexedInstanced,
-                reinterpret_cast<void**>(&oDrawIndexedInstanced)) != MH_OK) {
-                dbg::log_ex(dbg::Level::Warn, dbg::Init, "[Chams] CreateHook DrawIndexedInstanced failed");
-                ok = false;
-            }
-            if (MH_CreateHook(g_addr_ia_set_vb, &hkIASetVertexBuffers,
-                reinterpret_cast<void**>(&oIASetVertexBuffers)) != MH_OK) {
-                dbg::log_ex(dbg::Level::Warn, dbg::Init, "[Chams] CreateHook IASetVertexBuffers failed");
-                ok = false;
-            }
-            if (MH_CreateHook(g_addr_set_pso, &hkSetPipelineState,
-                reinterpret_cast<void**>(&oSetPipelineState)) != MH_OK) {
-                dbg::log_ex(dbg::Level::Warn, dbg::Init, "[Chams] CreateHook SetPipelineState failed");
-                ok = false;
-            }
-            if (MH_CreateHook(g_addr_create_pso, &hkCreateGfxPSO,
-                reinterpret_cast<void**>(&oCreateGfxPSO)) != MH_OK) {
-                dbg::log_ex(dbg::Level::Warn, dbg::Init, "[Chams] CreateHook CreateGfxPSO failed");
-                ok = false;
-            }
-            if (!ok) return false;
-            g_hooks_created = true;
-            dbg::log_ex(dbg::Level::Warn, dbg::Init, "[Chams] All 4 hooks created");
-        }
-
-        // Enable
-        bool ok = true;
-        if (MH_EnableHook(g_addr_draw_indexed) != MH_OK) ok = false;
-        if (MH_EnableHook(g_addr_ia_set_vb)    != MH_OK) ok = false;
-        if (MH_EnableHook(g_addr_set_pso)       != MH_OK) ok = false;
-        if (MH_EnableHook(g_addr_create_pso)    != MH_OK) ok = false;
-
-        if (ok) {
-            g_hooks_active = true;
-            dbg::log_ex(dbg::Level::Warn, dbg::Init, "[Chams] Hooks ENABLED — capturing PSOs");
-        } else {
-            dbg::log_ex(dbg::Level::Warn, dbg::Init, "[Chams] Failed to enable some hooks");
-        }
-        return ok;
+        dbg::log_ex(dbg::Level::Error, dbg::Init, "[Chams] No emissive material found.");
     }
 
-    inline void disable_hooks() {
-        if (!g_hooks_active) return;
+    // ── Resolve FName for EmissiveColor parameter once ──
+    inline void resolve_fnames() {
+        if (g_fname_resolved) return;
+        g_fname_resolved = true;
 
-        MH_DisableHook(g_addr_draw_indexed);
-        MH_DisableHook(g_addr_ia_set_vb);
-        MH_DisableHook(g_addr_set_pso);
-        MH_DisableHook(g_addr_create_pso);
-
-        g_hooks_active = false;
-        dbg::log_ex(dbg::Level::Warn, dbg::Init, "[Chams] Hooks DISABLED");
-    }
-
-    // ========================================================================
-    // Cleanup — release all chams PSOs
-    // ========================================================================
-    inline void cleanup() {
-        disable_hooks();
-        std::lock_guard<std::mutex> lk(g_mutex);
-        for (auto& [k, v] : g_chams_map) {
-            if (v) v->Release();
+        if (sdk::String) {
+            g_fname_emissive = sdk::String->StringToName(FString(L"EmissiveColor"));
+            dbg::log_ex(dbg::Level::Warn, dbg::Init,
+                "[Chams] FName 'EmissiveColor' = %u", g_fname_emissive.index);
         }
-        g_chams_map.clear();
-        g_chams_pso_count = 0;
     }
+
+    // ── Tracking helpers ──
+    inline bool already_applied(std::uintptr_t addr) {
+        for (int i = 0; i < g_applied_count; i++) {
+            if (g_applied[i] == addr) return true;
+        }
+        return false;
+    }
+
+    inline void mark_applied(std::uintptr_t addr) {
+        if (g_applied_count < 512) {
+            g_applied[g_applied_count++] = addr;
+        }
+    }
+
+    // No-op — kept for call-site compatibility in main.h
+    inline void begin_frame() {}
+
+    inline int g_apply_log_count = 0;
+
+    // ── Apply chams: replace materials with colored emissive ──
+    inline void apply(APrimalCharacter* character, const float* color, float intensity) {
+        if (!character) return;
+
+        // Init material + FNames on first call
+        if (!g_mat_init) init_material();
+        if (!g_mat_ok) return;
+        if (!g_fname_resolved) resolve_fnames();
+
+        USkeletalMeshComponent* mesh = nullptr;
+        __try { mesh = character->GetMesh(); } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+        if (!mesh) return;
+
+        auto mesh_addr = reinterpret_cast<std::uintptr_t>(mesh);
+
+        __try {
+            if (!already_applied(mesh_addr)) {
+                int num_mats = mesh->GetNumMaterials();
+
+                if (g_apply_log_count < 5) {
+                    dbg::log_ex(dbg::Level::Warn, dbg::Init,
+                        "[Chams] mesh=%p numMats=%d", mesh, num_mats);
+                }
+
+                if (num_mats <= 0 || num_mats > 64) {
+                    if (g_apply_log_count < 5) {
+                        dbg::log_ex(dbg::Level::Warn, dbg::Init,
+                            "[Chams] Skipping — invalid numMats=%d", num_mats);
+                        g_apply_log_count++;
+                    }
+                    return;
+                }
+
+                FLinearColor emissive_color(
+                    color[0] * intensity,
+                    color[1] * intensity,
+                    color[2] * intensity,
+                    1.0f
+                );
+
+                // For each slot: SetMaterial → CreateDynamicMaterialInstance → set params DIRECTLY on MID
+                for (int i = 0; i < num_mats; i++) {
+                    // Replace with emissive material
+                    mesh->SetMaterial(i, g_emissive_material);
+
+                    // Create dynamic instance (MID) from the emissive material
+                    UObject* mid = mesh->CreateDynamicMaterial(i);
+
+                    if (g_apply_log_count < 3 && i == 0) {
+                        dbg::log_ex(dbg::Level::Warn, dbg::Init,
+                            "[Chams] slot=%d SetMaterial+CreateDynamic mid=%p", i, mid);
+                    }
+
+                    // Set color parameters DIRECTLY on the MID object
+                    // EmissiveMeshMaterial has a parameter called "Color" (confirmed from UE5 source)
+                    if (mid && sdk::String) {
+                        const wchar_t* vec_names[] = {
+                            L"Color", L"EmissiveColor", L"Emissive Color",
+                            L"BaseColor", L"Base Color", L"TintColor",
+                            L"GlowColor", L"Colour", L"Emissive",
+                        };
+
+                        for (auto* pname : vec_names) {
+                            FName fn = sdk::String->StringToName(FString(pname));
+                            MID_SetVectorParam(mid, fn, emissive_color);
+                        }
+
+                        const wchar_t* scalar_names[] = {
+                            L"EmissiveScale", L"Intensity", L"EmissiveIntensity",
+                            L"GlowIntensity", L"Opacity",
+                        };
+
+                        for (auto* sname : scalar_names) {
+                            FName fn = sdk::String->StringToName(FString(sname));
+                            MID_SetScalarParam(mid, fn, intensity);
+                        }
+
+                        if (g_apply_log_count < 3 && i == 0) {
+                            dbg::log_ex(dbg::Level::Warn, dbg::Init,
+                                "[Chams] MID params set on mid=%p (direct API)", mid);
+                        }
+                    }
+                }
+
+                // Also try through mesh component (backup path)
+                if (sdk::String) {
+                    const wchar_t* mesh_vec[] = { L"Color", L"EmissiveColor", L"BaseColor" };
+                    for (auto* pn : mesh_vec) {
+                        FName fn = sdk::String->StringToName(FString(pn));
+                        mesh->SetVectorParamOnMaterials(fn, emissive_color);
+                    }
+                }
+
+                // Enable custom depth for through-wall visibility
+                mesh->SetRenderCustomDepth(true);
+                mesh->SetCustomDepthStencilValue(255);
+
+                if (g_apply_log_count < 5) {
+                    dbg::log_ex(dbg::Level::Warn, dbg::Init,
+                        "[Chams] Applied to mesh=%p color=(%.1f,%.1f,%.1f)*%.1f",
+                        mesh, color[0], color[1], color[2], intensity);
+                    g_apply_log_count++;
+                }
+
+                mark_applied(mesh_addr);
+                g_dynamic_count = g_applied_count;
+                g_names_resolved = true;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            if (g_apply_log_count < 5) {
+                dbg::log_ex(dbg::Level::Error, dbg::Init,
+                    "[Chams] Exception in apply for mesh=%p", mesh);
+                g_apply_log_count++;
+            }
+        }
+    }
+
+    // ── Remove chams from a character ──
+    inline void clear(APrimalCharacter* character) {
+        if (!character) return;
+
+        USkeletalMeshComponent* mesh = nullptr;
+        __try { mesh = character->GetMesh(); } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+        if (!mesh) return;
+
+        __try {
+            mesh->SetRenderCustomDepth(false);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+
+    // ── Apply chams for a player character ──
+    inline void apply_player(APrimalCharacter* character) {
+        if (!config::chams::enabled || !config::chams::players) return;
+        apply(character, config::chams::player_color, config::chams::intensity);
+    }
+
+    // ── Apply chams for a dino character ──
+    inline void apply_dino(APrimalCharacter* character) {
+        if (!config::chams::enabled || !config::chams::dinos) return;
+        apply(character, config::chams::dino_color, config::chams::intensity);
+    }
+
+    // Stubs for compatibility
+    inline void cleanup() {}
 
 } // namespace chams
 } // namespace features
